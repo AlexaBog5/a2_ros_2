@@ -11,7 +11,7 @@
 # on disconnect — only this script can bring it back up.
 set -e
 
-MAC="D4:2F:4B:B3:F5:4A"
+MAC="D4:2F:4B:58:84:33"
 COMPOSE_FILE="$(dirname "$(realpath "$0")")/../../compose.pc2.yaml"
 DC="docker compose -f $COMPOSE_FILE"
 
