@@ -1,62 +1,149 @@
 """
-Navigation stack launch for A2 simulation.
+Mega autonomy launch: TARE + FAR planners with waypoint mux.
 
-Starts the CMU Autonomous Exploration stack on top of the running sim:
-  - terrain_analysis     : builds /terrain_map from /registered_scan + /state_estimation
-  - terrain_analysis_ext : builds /terrain_map_ext (global terrain for far_planner)
-  - local_planner        : obstacle-aware path selection + path follower
-  - far_planner          : global visibility-graph planner
+Starts terrain analysis, local planner, path follower, TARE exploration,
+FAR navigation, waypoint_mux, and optionally object detection + detection_processor.
 
-Prerequisites (provided by sim.launch.py + a2_bridge):
-  /state_estimation  - ground-truth odometry (published by a2_bridge_sim in a2_unitree_bridge)
-  /registered_scan   - world-frame lidar cloud (published by a2_bridge_sim in a2_unitree_bridge)
-  /clock             - sim time clock (published by a2_bridge_sim in a2_unitree_bridge)
+Prerequisites (sim.launch.py + a2_bridge):
+  /state_estimation, /registered_scan, /clock
 
 Usage:
-  # Terminal 1
-  ros2 launch a2_ros sim.launch.py
+  ros2 launch a2_ros mega.launch.py rviz:=true use_sim_time:=true
+  ros2 launch a2_ros mega.launch.py use_sim_time:=true enable_detection:=true sim_detection:=true
 
-  # Terminal 2 (after sim is up)
-  ros2 launch a2_ros navigation.launch.py
-
-  # Then bring the robot up to locomotion. These go through the /a2/set_mode
-  # service (via the `a2` CLI), which reports whether each transition was
-  # accepted by the FSM:
-  a2 stand    # mode 2: stand up
-  a2 unlock   # mode 3: unlock joints (balance stand)
-  a2 walk     # mode 4: locomotion
-
-  # Send a navigation goal in RViz using the 'Goalpoint' button,
-  # or publish directly:
-  ros2 topic pub /way_point geometry_msgs/msg/PointStamped \
-    "{header: {frame_id: 'odom'}, point: {x: 5.0, y: 0.0, z: 0.0}}"
+Switch planner at runtime:
+  ros2 topic pub --once /planner/select std_msgs/msg/String "{data: 'far'}"
+  ros2 topic pub --once /planner/select std_msgs/msg/String "{data: 'tare'}"
 """
 
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetParameter
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     description_dir = get_package_share_directory('a2_description')
     a2_ros_dir      = get_package_share_directory('a2_ros')
-    rviz_path       = os.path.join(a2_ros_dir, 'rviz', 'navigation.rviz')
-    far_config      = os.path.join(a2_ros_dir, 'config', 'autonomy', 'far_a2.yaml')
+    rviz_path        = os.path.join(a2_ros_dir, 'rviz', 'exploration.rviz')
+    tare_config      = os.path.join(a2_ros_dir, 'config', 'autonomy', 'tare_a2.yaml')
+    far_config       = os.path.join(a2_ros_dir, 'config', 'autonomy', 'far_a2.yaml')
+
+    use_sim_time = LaunchConfiguration('use_sim_time')
 
     rviz_arg = DeclareLaunchArgument(
         'rviz',
+        default_value='true',
+        description='Launch RViz2'
+    )
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
         default_value='false',
-        description='Launch RViz2 with navigation config'
+        description='Use simulation time'
+    )
+    enable_detection_arg = DeclareLaunchArgument(
+        'enable_detection',
+        default_value='false',
+        description='Launch YOLO object_detection + detection_processor nodes',
+    )
+    sim_detection_arg = DeclareLaunchArgument(
+        'sim_detection',
+        default_value='false',
+        description='Use sim object_detection launch (uncompressed /camera/image_raw)',
+    )
+    object_detection_classes_arg = DeclareLaunchArgument(
+        'object_detection_classes',
+        default_value='[39, 25]',
+        description='COCO class IDs for YOLO detection',
+    )
+    detection_csv_arg = DeclareLaunchArgument(
+        'detection_csv',
+        default_value='/tmp/a2_mission/detections.csv',
+        description='CSV output path for detection_processor',
+    )
+
+    object_detection_sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('object_detection'),
+                'launch',
+                'object_detection.launch.py',
+            ])
+        ),
+        condition=IfCondition(
+            PythonExpression([
+                "'",
+                LaunchConfiguration('enable_detection'),
+                "' == 'true' and '",
+                LaunchConfiguration('sim_detection'),
+                "' == 'true'",
+            ])
+        ),
+        launch_arguments={
+            'object_detection_classes': LaunchConfiguration('object_detection_classes'),
+            'lidar_topic': '/front_lidar/points',
+            'input_camera_name': '/camera',
+        }.items(),
+    )
+
+    object_detection_real = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('object_detection'),
+                'launch',
+                'object_detection_real.launch.py',
+            ])
+        ),
+        condition=IfCondition(
+            PythonExpression([
+                "'",
+                LaunchConfiguration('enable_detection'),
+                "' == 'true' and '",
+                LaunchConfiguration('sim_detection'),
+                "' != 'true'",
+            ])
+        ),
+        launch_arguments={
+            'object_detection_classes': LaunchConfiguration('object_detection_classes'),
+            'lidar_topic': '/front_lidar/points',
+            'input_camera_name': '/camera',
+            'debayer_image': 'false',
+        }.items(),
+    )
+
+    detection_processor = Node(
+        package='a2_orchestrator',
+        executable='detection_processor',
+        name='detection_processor',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('enable_detection')),
+        parameters=[{
+            'detection_info_topic': '/detection_info',
+            'investigate_point_topic': '/investigate_point',
+            'detection_enable_topic': '/detection/enable',
+            'detection_save_topic': '/detection/save',
+            'map_frame': 'map',
+            'output_csv': LaunchConfiguration('detection_csv'),
+        }],
     )
 
     nodes = [
         rviz_arg,
-        # Use sim time for all navigation nodes
-        SetParameter(name='use_sim_time', value=False),
+        use_sim_time_arg,
+        enable_detection_arg,
+        sim_detection_arg,
+        object_detection_classes_arg,
+        detection_csv_arg,
+        SetParameter(
+            name='use_sim_time',
+            value=ParameterValue(use_sim_time, value_type=bool),
+        ),
 
         # ---- terrain analysis (local map) ----
         Node(
@@ -66,8 +153,8 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'scanVoxelSize':       0.05,
-                'decayTime':           15.0,
-                'noDecayDis':          2.0,
+                'decayTime':           10.0,
+                'noDecayDis':          0.0,
                 'clearingDis':         8.0,
                 'useSorting':          True,
                 'quantileZ':           0.25,
@@ -94,7 +181,7 @@ def generate_launch_description():
             }],
         ),
 
-        # ---- terrain analysis ext (global map for far_planner) ----
+        # ---- terrain analysis ext (global map) ----
         Node(
             package='terrain_analysis_ext',
             executable='terrainAnalysisExt',
@@ -120,8 +207,7 @@ def generate_launch_description():
                 'localTerrainMapRadius': 4.0,
             }],
         ),
-
-        # ---- local planner (obstacle avoidance + path following) ----
+        # ---- local planner ----
         Node(
             package='local_planner',
             executable='localPlanner',
@@ -152,16 +238,16 @@ def generate_launch_description():
                 'dirWeight':           0.1,
                 'dirThre':             90.0,
                 'dirToVehicle':        False,
-                'pathScale':           0.25,
-                'minPathScale':        0.5,
+                'pathScale':           1.0,
+                'minPathScale':        0.75,
                 'pathScaleStep':       0.25,
-                'pathScaleBySpeed':    False,
+                'pathScaleBySpeed':    True,
                 'minPathRange':        1.0,
                 'pathRangeStep':       0.5,
                 'pathRangeBySpeed':    True,
                 'pathCropByGoal':      True,
                 'autonomyMode':        True,
-                'autonomySpeed':       1.0,
+                'autonomySpeed':       2.0,
                 'joyToSpeedDelay':     2.0,
                 'joyToCheckObstacleDelay': 5.0,
                 'goalClearRange':      0.4,
@@ -202,17 +288,24 @@ def generate_launch_description():
                 'noRotAtStop':      False,
                 'noRotAtGoal':      True,
                 'autonomyMode':     True,
-                'autonomySpeed':    1.0,
+                'autonomySpeed':    2.0,
                 'joyToSpeedDelay':  2.0,
             }],
         ),
 
-        # Node(
-        #     package='a2_ros',
-        #     executable='nav_vel_relay',
-        #     name='nav_vel_relay',
-        #     output='screen',
-        # ),
+        # ---- TARE planner (autonomous exploration) ----
+        Node(
+            package='tare_planner',
+            executable='tare_planner_node',
+            name='tare_planner_node',
+            output='screen',
+            parameters=[
+                tare_config,
+                {
+                    'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
+                },
+            ],
+        ),
 
         # ---- far_planner (global visibility-graph planner) ----
         Node(
@@ -230,27 +323,41 @@ def generate_launch_description():
                 ('/terrain_cloud',      '/terrain_map_ext'),
                 ('/scan_cloud',         '/registered_scan'),
                 ('/terrain_local_cloud','/terrain_map'),
+                ('/way_point',          '/far/way_point'),
             ],
         ),
 
-        # ---- RViz with navigation config ----
+        # ---- waypoint mux (TARE or FAR -> /way_point) ----
+        Node(
+            package='a2_orchestrator',
+            executable='waypoint_mux',
+            name='waypoint_mux',
+            output='screen',
+            parameters=[{
+                'default_source': 'tare',
+                'tare_waypoint_topic': '/tare/way_point',
+                'far_waypoint_topic': '/far/way_point',
+                'output_waypoint_topic': '/way_point',
+                'select_topic': '/planner/select',
+            }],
+        ),
+
+
+        # ---- object detection (optional; gated at runtime via /detection/enable) ----
+        object_detection_sim,
+        object_detection_real,
+        detection_processor,
+
+        # ---- RViz ----
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2',
             output='screen',
             arguments=['-d', rviz_path],
-            parameters=[{'use_sim_time': False}],
+            parameters=[{'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}],
             condition=IfCondition(LaunchConfiguration('rviz')),
         ),
     ]
 
     return LaunchDescription(nodes)
-
-
-def _pkg_exists(pkg):
-    try:
-        get_package_share_directory(pkg)
-        return True
-    except Exception:
-        return False

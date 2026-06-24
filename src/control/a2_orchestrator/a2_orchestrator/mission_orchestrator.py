@@ -38,7 +38,7 @@ class MissionOrchestrator(Node):
         self._declare_parameters()
         self._load_parameters()
 
-        self._state = MissionState.CHECK_PREREQS
+        self._state = MissionState.RECORD_HOME
         self._node_launched_at = time.monotonic()
         self._state_entered_mono = time.monotonic()
         self._exploring_started_mono: Optional[float] = None

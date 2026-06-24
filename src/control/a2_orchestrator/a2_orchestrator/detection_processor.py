@@ -129,19 +129,7 @@ class DetectionProcessor(Node):
             10,
         )
 
-        self._csv_headers = [
-            'class_id',
-            'global_x',
-            'global_y',
-            'global_z',
-            'confidence',
-            'bbox_min_x',
-            'bbox_min_y',
-            'bbox_max_x',
-            'bbox_max_y',
-            'pending_confirmation',
-            'continue_sent',
-        ]
+        self._csv_headers = ['class', 'x', 'y', 'z']
 
         self.get_logger().info(
             f'DetectionProcessor ready: sub={self._detection_info_topic}, '
@@ -314,7 +302,14 @@ class DetectionProcessor(Node):
                 writer = csv.DictWriter(csvfile, fieldnames=self._csv_headers)
                 writer.writeheader()
                 for data in rows:
-                    writer.writerow(data)
+                    writer.writerow(
+                        {
+                            'class': data['class_id'],
+                            'x': data['global_x'],
+                            'y': data['global_y'],
+                            'z': data['global_z'],
+                        }
+                    )
         except OSError as ex:
             self.get_logger().error(f'Failed to write detection CSV: {ex}')
             return False
