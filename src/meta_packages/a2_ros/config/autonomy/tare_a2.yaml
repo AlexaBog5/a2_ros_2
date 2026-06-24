@@ -15,7 +15,6 @@ tare_planner_node:
     pub_runtime_topic_ : /runtime
     pub_waypoint_topic_ : /way_point
     pub_momentum_activation_count_topic_ : momentum_activation_count
-
     kAutoStart : true               # start exploring immediately without external trigger
     kRushHome : false               # return to start when near home after exploration finishes
     kUseTerrainHeight : true        # use terrain map height for terrain-aware planning
@@ -23,13 +22,13 @@ tare_planner_node:
     kExtendWayPoint : true          # extend lookahead waypoint further if it is within extend distance
     kUseLineOfSightLookAheadPoint : true  # require line-of-sight to lookahead point; pick alternative if blocked
     kNoExplorationReturnHome : false      # return to start when exploration is complete
-    kExtendWayPointDistanceBig : 4.0     # extension distance when waypoint has line-of-sight (m)
-    kExtendWayPointDistanceSmall : 2.5   # extension distance when waypoint does not have line-of-sight (m)
+    kExtendWayPointDistanceBig : 8.0     # extension distance when waypoint has line-of-sight (m)
+    kExtendWayPointDistanceSmall : 3.5   # extension distance when waypoint does not have line-of-sight (m)
     kKeyposeCloudDwzFilterLeafSize : 0.2 # voxel leaf size for downsampling keypose / registered scan clouds (m)
     kRushHomeDist : 10.0            # distance to home below which rush-home activates (m)
     kAtHomeDistThreshold : 0.5      # distance to consider robot arrived at home (m)
     kTerrainCollisionThreshold : 0.3     # terrain point intensity above this is treated as a collision obstacle
-    kLookAheadDistance : 5.0        # distance ahead on path to project lookahead waypoint (m)
+    kLookAheadDistance : 8.0        # distance ahead on path to project lookahead waypoint (m)
     kUseMomentum : false            # bias waypoint selection toward previous travel direction
     kDirectionChangeCounterThr : 6       # consecutive direction changes before momentum switch triggers
     kDirectionNoChangeCounterThr : 5     # steps without direction change before stuck detection triggers
@@ -38,7 +37,7 @@ tare_planner_node:
     # PlanningEnv
     kUseFrontier : true                       # enable frontier-based exploration
     kFrontierClusterTolerance : 1.0           # max distance to merge frontier points into one cluster (m)
-    kFrontierClusterMinSize : 20              # min points in a frontier cluster to keep it
+    kFrontierClusterMinSize : 12             # min points in a frontier cluster to keep it
     kUseCoverageBoundaryOnFrontier : false    # clip frontiers to coverage boundary polygon
     kUseCoverageBoundaryOnObjectSurface : false  # clip keypose cloud to coverage boundary polygon
 
@@ -70,11 +69,11 @@ tare_planner_node:
     keypose_graph/kAddEdgeCollisionCheckPointNumThr : 1   # collision points needed to reject an edge
 
     # ViewPointManager — grid of candidate sensor poses for coverage planning
-    viewpoint_manager/number_x : 10    # viewpoint grid cells in X
-    viewpoint_manager/number_y : 10    # viewpoint grid cells in Y
+    viewpoint_manager/number_x : 25    # viewpoint grid cells in X
+    viewpoint_manager/number_y : 25    # viewpoint grid cells in Y
     viewpoint_manager/number_z : 1     # viewpoint grid cells in Z (1 = 2-D planning)
-    viewpoint_manager/resolution_x : 0.8  # viewpoint cell size X (m)
-    viewpoint_manager/resolution_y : 0.8  # viewpoint cell size Y (m)
+    viewpoint_manager/resolution_x : 0.6  # viewpoint cell size X (m)
+    viewpoint_manager/resolution_y : 0.6  # viewpoint cell size Y (m)
     viewpoint_manager/resolution_z : 0.0  # viewpoint cell size Z (m)
     kConnectivityHeightDiffThr : 0.25     # max height difference for two viewpoints to be connected (m)
     kGreedyViewPointSampleRange : 3       # candidates sampled per greedy selection step
@@ -93,7 +92,7 @@ tare_planner_node:
     kCheckDynamicObstacleCollision : false  # check collision against recent obstacle frames (for dynamic envs)
     kCollisionFrameCountMax : 3             # history frames used for dynamic obstacle collision check
 
-    kSensorRange : 10.0          # max range used for coverage calculations — matches lidar cutoff (m)
+    kSensorRange : 7.5          # max range used for coverage calculations — matches lidar cutoff (m)
     kNeighborRange : 2.5         # search radius for viewpoint connectivity (m)
     kCoverageOcclusionThr : 0.3  # distance threshold for occlusion in coverage calculation (m)
     kCoverageDilationRadius : 0.8  # dilation radius applied to covered area (m)
@@ -104,13 +103,13 @@ tare_planner_node:
     kGridWorldZNum : 1            # global grid cells in Z (1 = flat/ground-level only)
     kGridWorldCellHeight : 1.5    # size of each global grid cell (m)
     kGridWorldNearbyGridNum : 5   # nearby cells considered for local search
-    kMinAddPointNumSmall : 20     # min new coverage points for a minor coverage increment
-    kMinAddPointNumBig : 40       # min new coverage points for a significant coverage increment
-    kMinAddFrontierPointNum : 10  # min points for a frontier cell to remain active
-    kCellExploringToCoveredThr : 1    # coverage count to transition cell: exploring → covered
-    kCellCoveredToExploringThr : 10   # coverage count drop to revert cell: covered → exploring
-    kCellExploringToAlmostCoveredThr : 10   # coverage count for exploring → almost-covered
-    kCellAlmostCoveredToExploringThr : 20   # coverage count drop to revert: almost-covered → exploring
+    kMinAddPointNumSmall : 50     # min new coverage points for a minor coverage increment
+    kMinAddPointNumBig : 100      # min new coverage points for a significant coverage increment
+    kMinAddFrontierPointNum : 15  # min points for a frontier cell to remain active
+    kCellExploringToCoveredThr : 3    # coverage count to transition cell: exploring → covered
+    kCellCoveredToExploringThr : 15   # coverage count drop to revert cell: covered → exploring
+    kCellExploringToAlmostCoveredThr : 15   # coverage count for exploring → almost-covered
+    kCellAlmostCoveredToExploringThr : 30   # coverage count drop to revert: almost-covered → exploring
     kCellUnknownToExploringThr : 1    # coverage count to activate unknown cell as exploring
 
     # Visualization only — no effect on planning
@@ -126,3 +125,6 @@ tare_planner_node:
     kLocalPlanningHorizonMarkerColorA : 1.0
     kLocalPlanningHorizonMarkerWidth : 0.3
     kLocalPlanningHorizonHeight : 1.5
+
+
+
