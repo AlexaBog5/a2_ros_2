@@ -31,11 +31,15 @@ def generate_launch_description():
     rviz = LaunchConfiguration('rviz')
     use_sim_time = LaunchConfiguration('use_sim_time')
     map_saving_node = LaunchConfiguration('map_saving_node')
+    pointcloud_topic = LaunchConfiguration('pointcloud_topic')
+    imu_topic = LaunchConfiguration('imu_topic')
 
     return LaunchDescription([
         DeclareLaunchArgument('rviz', default_value='false', description='Launch RViz2'),
         DeclareLaunchArgument('use_sim_time', default_value='false', description='Use simulation time'),
         DeclareLaunchArgument('map_saving_node', default_value='false', description='Launch the MapSaving node'),
+        DeclareLaunchArgument('pointcloud_topic', default_value='/front_lidar/points', description='LiDAR pointcloud topic'),
+        DeclareLaunchArgument('imu_topic', default_value='/front_lidar/imu', description='IMU topic'),
 
         Node(
             package='resple',
@@ -43,7 +47,14 @@ def generate_launch_description():
             name='RESPLE',
             emulate_tty=True,
             output='both',
-            parameters=[a2_params, {'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}],
+            parameters=[
+                a2_params,
+                {
+                    'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
+                    'topic_imu': imu_topic,
+                    'front_hesai.topic_lidar': pointcloud_topic,
+                }
+            ],
             arguments=['--ros-args', '--log-level', 'INFO'],
         ),
 
@@ -53,9 +64,16 @@ def generate_launch_description():
             name='Mapping',
             emulate_tty=True,
             output='both',
-            parameters=[a2_params, {'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}],
+            parameters=[
+                a2_params,
+                {
+                    'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
+                    'front_hesai.topic_lidar': pointcloud_topic,
+                }
+            ],
             arguments=['--ros-args', '--log-level', 'INFO'],
         ),
+
 
         Node(
             package='resple',
