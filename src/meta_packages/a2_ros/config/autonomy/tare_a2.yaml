@@ -15,7 +15,7 @@ tare_planner_node:
     pub_runtime_topic_ : /runtime
     pub_waypoint_topic_ : /way_point
     pub_momentum_activation_count_topic_ : momentum_activation_count
-    kAutoStart : true               # start exploring immediately without external trigger
+    kAutoStart : false              # start exploring immediately without external trigger
     kRushHome : false               # return to start when near home after exploration finishes
     kUseTerrainHeight : true        # use terrain map height for terrain-aware planning
     kCheckTerrainCollision : true   # reject terrain points above kTerrainCollisionThreshold as obstacles
