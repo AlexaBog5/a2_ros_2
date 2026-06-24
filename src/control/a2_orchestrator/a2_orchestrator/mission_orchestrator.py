@@ -21,6 +21,7 @@ from std_msgs.msg import Bool, String
 from a2_orchestrator.mission_state import MissionState
 
 RESUME_ORIGIN_EPSILON = 1e-3
+INVESTIGATION_TIMEOUT_SEC = 30.0
 
 
 class MissionOrchestrator(Node):
@@ -547,9 +548,12 @@ class MissionOrchestrator(Node):
         """Navigate to a detected object via FAR; resume via origin on ``/investigate_point``."""
         if self._check_exploration_timeout():
             return
+        if self._state_elapsed() >= INVESTIGATION_TIMEOUT_SEC:
+            self._transition(MissionState.EXPLORING, 'investigation timeout')
+            return
         self._set_status(
-            f'investigating ({self._exploring_elapsed():.0f}s, '
-            f'limit={self._exploration_timeout_sec:.0f}s)'
+            f'investigating ({self._state_elapsed():.0f}s, '
+            f'limit={INVESTIGATION_TIMEOUT_SEC:.0f}s)'
         )
 
     def _tick_save_map(self) -> None:
