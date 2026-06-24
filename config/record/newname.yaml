@@ -1,0 +1,17 @@
+# Navigation debug bag: odometry, scans, velocity commands, and TF.
+topics:
+  - /odom
+  - /cmd_vel
+  - /nav_vel_cmd
+  - /imu/data
+  - /registered_scan
+  - /front_lidar/points
+  - /front_lidar/ptp
+  - /tf
+  - /tf_static
+  - /camera/camera_info
+  - /camera/image/compressed
+  - /front_lidar/imu
+  - /dlio/odom_node/map_pose
+  - /registered_scan
+  - /state_estimation
