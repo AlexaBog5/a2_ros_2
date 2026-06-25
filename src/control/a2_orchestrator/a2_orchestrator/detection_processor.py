@@ -15,14 +15,14 @@ import tf2_ros
 from geometry_msgs.msg import PointStamped
 from object_detection_msgs.msg import ObjectDetectionInfoArray
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 WORLD_MATCH_DISTANCE_NOISY = 2.0
 WORLD_MATCH_DISTANCE = 1.0
 
 CAMERA_WIDTH = 640.0
-CAMERA_HEIGHT = 640.0
-MIN_BBOX_DIMENSION = 50.0
+CAMERA_HEIGHT = 320.0
+MIN_BBOX_DIMENSION = 30.0
 
 
 @dataclass
@@ -50,7 +50,7 @@ def bbox_dimensions(bbox: tuple) -> tuple[float, float]:
     return max_x - min_x, max_y - min_y
 
 
-def bbox_near_edge(bbox: tuple, margin: float = 10.0) -> bool:
+def bbox_near_edge(bbox: tuple, margin: float = 5.0) -> bool:
     """Return True when the bbox touches the image border within ``margin`` pixels."""
     min_x, min_y, max_x, max_y = bbox
     return (
@@ -128,6 +128,11 @@ class DetectionProcessor(Node):
             self._investigate_point_topic,
             10,
         )
+        self._dummy_pub = self.create_publisher(
+            String,
+            '/dummy',
+            10,
+        )
 
         self._csv_headers = ['class', 'x', 'y', 'z']
 
@@ -140,8 +145,10 @@ class DetectionProcessor(Node):
 
     def _save_callback(self, msg: Bool) -> None:
         """Write tracked detections to CSV when commanded by the mission orchestrator."""
+        self._dummy_pub.publidh("SAVING")
         if not msg.data:
             return
+        self._dummy_pub.publidh("SAVING")
         self.write_detections_csv()
 
     def _enable_callback(self, msg: Bool) -> None:
@@ -222,6 +229,17 @@ class DetectionProcessor(Node):
         self.get_logger().info(
             f'Publishing {self._investigate_point_topic}: origin (resume exploration)'
         )
+
+    def publish_dummy(self, detection, world_point: PointStamped) -> None:
+        """Publish a good detection summary to /dummy for debugging or downstream use."""
+        msg = String()
+        msg.data = (
+            f'class={detection.class_id} id={detection.id} '
+            f'confidence={detection.confidence:.2f} '
+            f'pos=({world_point.point.x:.3f}, {world_point.point.y:.3f}, {world_point.point.z:.3f})'
+        )
+        self._dummy_pub.publish(msg)
+        self.get_logger().info(f'Publishing /dummy: {msg.data}')
 
     def destroy_node(self):
         """Shut down without writing CSV (orchestrator triggers save via ``/detection/save``)."""
@@ -395,6 +413,7 @@ class DetectionProcessor(Node):
                         bbox=bbox,
                     )
                 )
+                self.publish_dummy(detection, world_point)
                 self.publish_resume_exploration()
                 continue
 
