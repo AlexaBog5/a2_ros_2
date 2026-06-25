@@ -35,7 +35,7 @@ Usage:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
@@ -230,7 +230,23 @@ def generate_launch_description():
                 ('/terrain_cloud',      '/terrain_map_ext'),
                 ('/scan_cloud',         '/registered_scan'),
                 ('/terrain_local_cloud','/terrain_map'),
+                ('/goal_point',         '/far_planner/goal_point'),
             ],
+        ),
+
+        # ---- multi_goal_manager (handles waypoint queue and timeouts) ----
+        ExecuteProcess(
+            cmd=[
+                'python3',
+                os.path.join(a2_ros_dir, 'launch', 'multi_goal_manager.py'),
+                '--ros-args',
+                '-p', 'goal_timeout:=30.0',
+                '-p', 'reach_threshold:=0.8',
+                '-p', 'publish_rate:=1.0',
+                '-p', 'use_multi_goal:=true',
+            ],
+            name='multi_goal_manager',
+            output='screen',
         ),
 
         # ---- RViz with navigation config ----
