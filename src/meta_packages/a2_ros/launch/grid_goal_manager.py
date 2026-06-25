@@ -76,6 +76,7 @@ class GridGoalManager(Node):
         self.marker_pub = self.create_publisher(MarkerArray, '/waypoint_markers', 10)
         self.detection_save_pub = self.create_publisher(Bool, '/detection/save', 10)
         self.detection_enable_pub = self.create_publisher(Bool, '/detection/enable', 10)
+        self.detection_reset_pub = self.create_publisher(Bool, '/detection/reset', 10)
         
         # Subscribers
         self.odom_sub = self.create_subscription(
@@ -267,6 +268,8 @@ class GridGoalManager(Node):
 
         self.grid_started = True
         self.exploration_start_time = self.get_clock().now()
+        self.publish_detection_reset()
+        self.publish_detection_enable()
         self.start_next_goal()
 
     def on_clear(self, msg):
@@ -417,6 +420,17 @@ class GridGoalManager(Node):
         self.detection_save_pub.publish(msg)
         self.get_logger().info("Published detection save request to /detection/save")
 
+    def publish_detection_enable(self):
+        msg = Bool()
+        msg.data = True
+        self.detection_enable_pub.publish(msg)
+
+    def publish_detection_reset(self):
+        msg = Bool()
+        msg.data = True
+        self.detection_reset_pub.publish(msg)
+        self.get_logger().info("Published detection reset request to /detection/reset")
+
     def trigger_save_map(self):
         if self.map_save_pending or self.map_save_done:
             return
@@ -503,10 +517,8 @@ class GridGoalManager(Node):
 
         # Check global exploration timeout
         if self.grid_started and not self.is_going_home and not self.search_completed:
-            # Periodically publish enable signal to detection processor to ensure it is active
-            enable_msg = Bool()
-            enable_msg.data = True
-            self.detection_enable_pub.publish(enable_msg)
+            # Keep detection processing enabled during grid exploration (giga pattern).
+            self.publish_detection_enable()
 
             if self.exploration_start_time is not None:
                 elapsed_total = (self.get_clock().now() - self.exploration_start_time).nanoseconds / 1e9
