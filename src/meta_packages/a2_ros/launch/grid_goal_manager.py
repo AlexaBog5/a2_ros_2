@@ -10,10 +10,12 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, Point
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, Bool
 from visualization_msgs.msg import Marker, MarkerArray
 import math
 from tf2_ros import Buffer, TransformListener
+from direct_lidar_inertial_odometry.srv import SavePCD
+from std_srvs.srv import Empty as SrvEmpty
 
 class GridGoalManager(Node):
     def __init__(self):
@@ -32,6 +34,7 @@ class GridGoalManager(Node):
         self.declare_parameter('goal_timeout', 25.0)      # Max duration (seconds) spent per grid point
         self.declare_parameter('reach_threshold', 0.8)    # Distance (meters) to declare success
         self.declare_parameter('publish_rate', 1.0)       # Frequency (Hz) to republish active goal to FAR Planner
+        self.declare_parameter('exploration_timeout', 60.0) # Global exploration timeout (seconds)
         
         # Read parameters
         self.x_min = self.get_parameter('x_min').value
@@ -44,6 +47,15 @@ class GridGoalManager(Node):
         self.reach_threshold = self.get_parameter('reach_threshold').value
         self.publish_rate = self.get_parameter('publish_rate').value
         self.use_local_frame = self.get_parameter('use_local_frame').value
+        self.exploration_timeout = self.get_parameter('exploration_timeout').value
+
+        # Save PCD parameters
+        self.declare_parameter('save_dir', '/tmp/a2_mission')
+        self.declare_parameter('map_leaf_size', 0.15)
+        self.declare_parameter('auto_save_map', True)
+        self.save_dir = self.get_parameter('save_dir').value
+        self.map_leaf_size = self.get_parameter('map_leaf_size').value
+        self.auto_save_map = self.get_parameter('auto_save_map').value
 
         self.get_logger().info(
             f"\n=======================================================\n"
@@ -62,6 +74,8 @@ class GridGoalManager(Node):
         # Publishers
         self.far_goal_pub = self.create_publisher(PointStamped, '/far_planner/goal_point', 5)
         self.marker_pub = self.create_publisher(MarkerArray, '/waypoint_markers', 10)
+        self.detection_save_pub = self.create_publisher(Bool, '/detection/save', 10)
+        self.detection_enable_pub = self.create_publisher(Bool, '/detection/enable', 10)
         
         # Subscribers
         self.odom_sub = self.create_subscription(
@@ -72,6 +86,12 @@ class GridGoalManager(Node):
             Empty, '/clear_goals', self.on_clear, 10)
         self.reset_graph_sub = self.create_subscription(
             Empty, '/reset_visibility_graph', self.on_clear, 10)
+        self.investigate_sub = self.create_subscription(
+            PointStamped, '/investigate_point', self.on_investigate, 10)
+            
+        # Services
+        self.save_pcd_client = self.create_client(SavePCD, '/save_pcd')
+        self.save_map_client = self.create_client(SrvEmpty, '/save_map')
             
         # State variables
         self.latest_odom = None
@@ -86,6 +106,14 @@ class GridGoalManager(Node):
         self.grid_generated = False
         self.grid_started = False
         self.search_completed = False
+        
+        self.home_pose = None
+        self.is_going_home = False
+        self.is_investigating = False
+        self.map_save_pending = False
+        self.map_save_done = False
+        self.exploration_start_time = None
+        self.home_reached = False
 
         # Generate initial lattice points only if not using local frame
         if not self.use_local_frame:
@@ -112,6 +140,14 @@ class GridGoalManager(Node):
 
     def on_odom(self, msg):
         self.latest_odom = msg
+
+        # Record initial position as home
+        if self.home_pose is None:
+            self.home_pose = msg.pose.pose.position
+            self.get_logger().info(
+                f"Recorded Home Position: ({self.home_pose.x:.2f}, "
+                f"{self.home_pose.y:.2f}, {self.home_pose.z:.2f})"
+            )
 
         # Generate grid relative to robot's current pose on first odom if using local frame
         if not self.grid_generated and self.use_local_frame:
@@ -230,6 +266,7 @@ class GridGoalManager(Node):
             self.goal_queue.append(g)
 
         self.grid_started = True
+        self.exploration_start_time = self.get_clock().now()
         self.start_next_goal()
 
     def on_clear(self, msg):
@@ -239,6 +276,12 @@ class GridGoalManager(Node):
         self.grid_started = False
         self.grid_generated = False
         self.search_completed = False
+        self.is_going_home = False
+        self.is_investigating = False
+        self.map_save_done = False
+        self.map_save_pending = False
+        self.exploration_start_time = None
+        self.home_reached = False
         
         # Command FAR Planner to hold position
         if self.latest_odom:
@@ -285,10 +328,39 @@ class GridGoalManager(Node):
 
     def start_next_goal(self):
         if not self.goal_queue:
-            self.current_goal = None
-            self.grid_started = False
-            self.search_completed = True
-            self.get_logger().info("Grid search completed successfully!")
+            if not self.is_going_home:
+                if self.home_pose is None:
+                    self.current_goal = None
+                    self.grid_started = False
+                    self.search_completed = True
+                    self.get_logger().info("Grid search completed! No home position recorded. Stopped.")
+                    return
+                
+                # Start heading home
+                self.get_logger().info("Grid search completed! Heading home...")
+                self.is_going_home = True
+                self.publish_detection_save()
+                
+                home_goal = PointStamped()
+                home_goal.header.frame_id = self.latest_odom.header.frame_id if self.latest_odom else "map"
+                home_goal.header.stamp = self.get_clock().now().to_msg()
+                home_goal.point = self.home_pose
+                
+                self.current_goal = home_goal
+                self.current_goal_start_time = self.get_clock().now()
+                self.last_pub_time = self.get_clock().now()
+                self.far_goal_pub.publish(self.current_goal)
+            else:
+                # We were going home and have arrived/finished!
+                self.current_goal = None
+                self.grid_started = False
+                self.search_completed = True
+                if self.home_reached:
+                    self.get_logger().info("Arrived at home! Grid search and return home completed.")
+                else:
+                    self.get_logger().warn("Return home timed out/aborted. Grid search finished.")
+                if self.auto_save_map and not self.map_save_done:
+                    self.trigger_save_map()
             return
             
         self.current_goal = self.goal_queue.pop(0)
@@ -303,12 +375,90 @@ class GridGoalManager(Node):
 
     def transition_to_next_goal(self):
         self.current_goal = None
-        if self.goal_queue:
+        self.is_investigating = False  # Reset investigation status on node transition
+        if self.goal_queue or self.is_going_home:
             self.start_next_goal()
         else:
-            self.get_logger().info("Grid search queue finished.")
-            self.grid_started = False
-            self.search_completed = True
+            self.start_next_goal()
+
+    def on_investigate(self, msg):
+        # Ignore target investigations if we are returning home or finished exploration
+        if self.is_going_home or self.search_completed:
+            self.get_logger().info("Ignoring investigate point since robot is already going home or search is completed.")
+            return
+
+        # Check for resume point (0, 0, 0)
+        if abs(msg.point.x) < 1e-3 and abs(msg.point.y) < 1e-3 and abs(msg.point.z) < 1e-3:
+            if self.is_investigating:
+                self.get_logger().info("Received resume signal. Returning to grid exploration.")
+                self.is_investigating = False
+                self.current_goal = None # Force transition back to grid queue
+            return
+
+        # Regular target investigation point
+        self.get_logger().info(
+            f"Received investigate point: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}). "
+            f"Pausing grid exploration."
+        )
+        
+        # Put active grid node back to queue front to resume later
+        if self.current_goal and not self.is_investigating and not self.is_going_home:
+            self.goal_queue.insert(0, self.current_goal)
+            
+        self.is_investigating = True
+        self.current_goal = msg
+        self.current_goal_start_time = self.get_clock().now()
+        self.last_pub_time = self.get_clock().now()
+        self.far_goal_pub.publish(self.current_goal)
+
+    def publish_detection_save(self):
+        msg = Bool()
+        msg.data = True
+        self.detection_save_pub.publish(msg)
+        self.get_logger().info("Published detection save request to /detection/save")
+
+    def trigger_save_map(self):
+        if self.map_save_pending or self.map_save_done:
+            return
+            
+        # Try RESPLE service first if available, otherwise fallback to DLIO
+        if self.save_map_client.wait_for_service(timeout_sec=0.5):
+            self.map_save_pending = True
+            self.get_logger().info("Triggering RESPLE Map Save via /save_map")
+            req = SrvEmpty.Request()
+            future = self.save_map_client.call_async(req)
+            future.add_done_callback(self.on_save_map_response_resple)
+        elif self.save_pcd_client.wait_for_service(timeout_sec=0.5):
+            self.map_save_pending = True
+            self.get_logger().info(f"Triggering DLIO Map Save to directory: {self.save_dir}")
+            req = SavePCD.Request()
+            req.leaf_size = float(self.map_leaf_size)
+            req.save_path = self.save_dir
+            future = self.save_pcd_client.call_async(req)
+            future.add_done_callback(self.on_save_map_response_dlio)
+        else:
+            self.get_logger().warn("Neither RESPLE (/save_map) nor DLIO (/save_pcd) save service is available. Map not saved automatically.")
+
+    def on_save_map_response_resple(self, future):
+        self.map_save_pending = False
+        try:
+            future.result()
+            self.map_save_done = True
+            self.get_logger().info("RESPLE Map saved successfully.")
+        except Exception as e:
+            self.get_logger().error(f"RESPLE Save map service call failed: {e}")
+
+    def on_save_map_response_dlio(self, future):
+        self.map_save_pending = False
+        try:
+            response = future.result()
+            if response.success:
+                self.map_save_done = True
+                self.get_logger().info(f"DLIO Map saved successfully: {response.message}")
+            else:
+                self.get_logger().error(f"DLIO Map saving failed: {response.message}")
+        except Exception as e:
+            self.get_logger().error(f"DLIO Save PCD service call failed: {e}")
 
     def is_point_occluded(self, p):
         # Checks if a point has become occluded by active segments
@@ -349,6 +499,26 @@ class GridGoalManager(Node):
         self.reach_threshold = self.get_parameter('reach_threshold').value
         self.publish_rate = self.get_parameter('publish_rate').value
         self.inflation_radius = self.get_parameter('inflation_radius').value
+        self.exploration_timeout = self.get_parameter('exploration_timeout').value
+
+        # Check global exploration timeout
+        if self.grid_started and not self.is_going_home and not self.search_completed:
+            # Periodically publish enable signal to detection processor to ensure it is active
+            enable_msg = Bool()
+            enable_msg.data = True
+            self.detection_enable_pub.publish(enable_msg)
+
+            if self.exploration_start_time is not None:
+                elapsed_total = (self.get_clock().now() - self.exploration_start_time).nanoseconds / 1e9
+                if elapsed_total > self.exploration_timeout:
+                    self.get_logger().warn(
+                        f"Global exploration timeout reached ({elapsed_total:.1f}s > {self.exploration_timeout:.1f}s)! "
+                        f"Returning home to save map..."
+                    )
+                    self.publish_detection_save()
+                    self.goal_queue.clear()
+                    self.transition_to_next_goal()
+                    return
 
         if self.current_goal:
             if not self.latest_odom:
@@ -378,11 +548,22 @@ class GridGoalManager(Node):
                 self.far_goal_pub.publish(self.current_goal)
                 self.last_pub_time = self.get_clock().now()
                 
+            # Use a longer timeout for heading home (120s) than normal waypoints
+            current_timeout = 120.0 if self.is_going_home else self.goal_timeout
+
             if dist < self.reach_threshold:
-                self.get_logger().info(f"Node reached! Success radius: {dist:.2f}m")
+                if self.is_going_home:
+                    self.get_logger().info(f"Arrived at home! Distance: {dist:.2f}m")
+                    self.home_reached = True
+                else:
+                    self.get_logger().info(f"Node reached! Success radius: {dist:.2f}m")
                 self.transition_to_next_goal()
-            elif elapsed > self.goal_timeout:
-                self.get_logger().info(f"Node timed out! Time spent: {elapsed:.1f}s")
+            elif elapsed > current_timeout:
+                if self.is_going_home:
+                    self.get_logger().warn(f"Heading home timed out after {elapsed:.1f}s! Saving map at current location.")
+                    self.home_reached = False
+                else:
+                    self.get_logger().info(f"Node timed out! Time spent: {elapsed:.1f}s")
                 self.transition_to_next_goal()
         else:
             if self.grid_started and self.goal_queue:
@@ -454,7 +635,13 @@ class GridGoalManager(Node):
             
             elapsed = (self.get_clock().now() - self.current_goal_start_time).nanoseconds / 1e9
             time_left = max(0.0, self.goal_timeout - elapsed)
-            text.text = f"Grid Node (T-min: {time_left:.1f}s)"
+            
+            if self.is_investigating:
+                text.text = f"Investigating Target (T-min: {time_left:.1f}s)"
+            elif self.is_going_home:
+                text.text = "Returning Home"
+            else:
+                text.text = f"Grid Node (T-min: {time_left:.1f}s)"
             msg.markers.append(text)
             
         for i, goal in enumerate(self.goal_queue):
