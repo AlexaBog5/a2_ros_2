@@ -19,6 +19,8 @@ from std_msgs.msg import Bool
 
 WORLD_MATCH_DISTANCE_NOISY = 2.0
 WORLD_MATCH_DISTANCE = 1.0
+# Only merge CSV rows closer than this (duplicate re-observations of one object).
+CSV_DEDUPE_DISTANCE = 0.4
 
 CAMERA_WIDTH = 640.0
 CAMERA_HEIGHT = 640.0
@@ -72,8 +74,9 @@ class DetectionProcessor(Node):
 
     Processing is gated by ``/detection/enable`` (published by ``mission_orchestrator``).
     CSV export is triggered by ``/detection/save`` when exploration ends (before nav home).
-    While disabled, detections are ignored so objects visible during stand/walk do not
-    trigger investigation. When disabled, tracked objects are cleared.
+    All valid detections (small, edge, or large) are tracked and written to CSV.
+    Small/edge detections may also trigger investigation; investigation status does
+    not affect whether a detection is saved.
     """
 
     def __init__(self) -> None:
@@ -86,6 +89,7 @@ class DetectionProcessor(Node):
         self.declare_parameter('detection_save_topic', '/detection/save')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('output_csv', 'detections.csv')
+        self.declare_parameter('world_match_distance', WORLD_MATCH_DISTANCE)
 
         self._detection_info_topic = self.get_parameter('detection_info_topic').value
         self._investigate_point_topic = self.get_parameter(
@@ -97,6 +101,9 @@ class DetectionProcessor(Node):
         self._detection_save_topic = self.get_parameter('detection_save_topic').value
         self._map_frame = self.get_parameter('map_frame').value
         self._csv_path = self.get_parameter('output_csv').value
+        self._world_match_distance = float(
+            self.get_parameter('world_match_distance').value
+        )
 
         self.objects: list[TrackedObject] = []
         self._processing_enabled = False
@@ -145,12 +152,12 @@ class DetectionProcessor(Node):
         self.write_detections_csv()
 
     def _enable_callback(self, msg: Bool) -> None:
-        """Latch enable flag from orchestrator; clear tracks when processing stops."""
+        """Latch enable flag from orchestrator; clear tracks when a new session starts."""
         if msg.data == self._processing_enabled:
             return
-        self._processing_enabled = msg.data
-        if not msg.data:
+        if msg.data:
             self.objects.clear()
+        self._processing_enabled = msg.data
         self.get_logger().info(
             f'Detection processing {"enabled" if msg.data else "disabled"}'
         )
@@ -195,16 +202,61 @@ class DetectionProcessor(Node):
                 )
                 return None
 
+    def _upsert_tracked_object(
+        self,
+        class_id: str,
+        wx: float,
+        wy: float,
+        wz: float,
+        confidence: float,
+        bbox: tuple,
+    ) -> tuple[TrackedObject, bool]:
+        """Insert or update a tracked object. Returns ``(object, is_new)``."""
+        matched_object = self.find_matching_object(class_id, wx, wy)
+
+        if matched_object is None:
+            obj = TrackedObject(
+                class_id=class_id,
+                global_x=wx,
+                global_y=wy,
+                global_z=wz,
+                confidence=confidence,
+                bbox=bbox,
+            )
+            self.objects.append(obj)
+            self.get_logger().info(
+                f'New track ({len(self.objects)} total): class={class_id} '
+                f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f}) conf={confidence:.2f}'
+            )
+            return obj, True
+
+        self.get_logger().debug(
+            f'Updating track class={class_id} '
+            f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f}) conf={confidence:.2f}'
+        )
+        matched_object.global_x = wx
+        matched_object.global_y = wy
+        matched_object.global_z = wz
+        matched_object.confidence = max(matched_object.confidence, confidence)
+        matched_object.bbox = bbox
+        return matched_object, False
+
     def find_matching_object(
         self, class_id: str, x: float, y: float
     ) -> TrackedObject | None:
-        """Return a tracked object of ``class_id`` within ``WORLD_MATCH_DISTANCE_NOISY`` of (x, y)."""
+        """Return the closest tracked object of ``class_id`` within match distance."""
+        best_match: TrackedObject | None = None
+        best_distance = self._world_match_distance
+
         for obj in self.objects:
             if obj.class_id != class_id:
                 continue
-            if distance_xy(x, y, obj.global_x, obj.global_y) < WORLD_MATCH_DISTANCE_NOISY:
-                return obj
-        return None
+            dist = distance_xy(x, y, obj.global_x, obj.global_y)
+            if dist < best_distance:
+                best_distance = dist
+                best_match = obj
+
+        return best_match
 
     def publish_investigate_point(self, waypoint: PointStamped) -> None:
         """Publish a non-origin map point so the orchestrator sends FAR to investigate."""
@@ -228,71 +280,56 @@ class DetectionProcessor(Node):
         return super().destroy_node()
 
     def aggregate_close_detections(self) -> list[dict]:
-        """Cluster nearby tracked objects by class for CSV export."""
-        clusters: list[dict] = []
-
+        """Prepare one CSV row per tracked object, deduping only exact re-hits."""
+        rows: list[dict] = []
         for obj in self.objects:
-            matched_cluster = None
-            for cluster in clusters:
-                if obj.class_id != cluster['class_id']:
-                    continue
-                if distance_xy(
-                    obj.global_x,
-                    obj.global_y,
-                    cluster['global_x'],
-                    cluster['global_y'],
-                ) <= WORLD_MATCH_DISTANCE_NOISY:
-                    matched_cluster = cluster
-                    break
-
-            if matched_cluster is None:
-                clusters.append(
-                    {
-                        'class_id': obj.class_id,
-                        'global_x': obj.global_x,
-                        'global_y': obj.global_y,
-                        'objs': [obj],
-                    }
-                )
-            else:
-                matched_cluster['objs'].append(obj)
-
-        aggregated: list[dict] = []
-        for cluster in clusters:
-            objs = cluster['objs']
-            total_confidence = sum(o.confidence for o in objs)
-            if total_confidence <= 0.0:
-                continue
-
-            aggregated.append(
+            rows.append(
                 {
-                    'class_id': cluster['class_id'],
-                    'global_x': sum(o.global_x * o.confidence for o in objs)
-                    / total_confidence,
-                    'global_y': sum(o.global_y * o.confidence for o in objs)
-                    / total_confidence,
-                    'global_z': sum(o.global_z * o.confidence for o in objs)
-                    / total_confidence,
-                    'confidence': total_confidence / len(objs),
-                    'bbox_min_x': sum(o.bbox[0] * o.confidence for o in objs)
-                    / total_confidence,
-                    'bbox_min_y': sum(o.bbox[1] * o.confidence for o in objs)
-                    / total_confidence,
-                    'bbox_max_x': sum(o.bbox[2] * o.confidence for o in objs)
-                    / total_confidence,
-                    'bbox_max_y': sum(o.bbox[3] * o.confidence for o in objs)
-                    / total_confidence,
-                    'pending_confirmation': any(
-                        o.pending_confirmation for o in objs
-                    ),
-                    'continue_sent': any(o.continue_sent for o in objs),
+                    'class_id': obj.class_id,
+                    'global_x': obj.global_x,
+                    'global_y': obj.global_y,
+                    'global_z': obj.global_z,
+                    'confidence': obj.confidence,
                 }
             )
 
-        return aggregated
+        deduped: list[dict] = []
+        for row in rows:
+            merged = False
+            for existing in deduped:
+                if row['class_id'] != existing['class_id']:
+                    continue
+                if distance_xy(
+                    row['global_x'],
+                    row['global_y'],
+                    existing['global_x'],
+                    existing['global_y'],
+                ) <= CSV_DEDUPE_DISTANCE:
+                    total_confidence = existing['confidence'] + row['confidence']
+                    if total_confidence > 0.0:
+                        existing['global_x'] = (
+                            existing['global_x'] * existing['confidence']
+                            + row['global_x'] * row['confidence']
+                        ) / total_confidence
+                        existing['global_y'] = (
+                            existing['global_y'] * existing['confidence']
+                            + row['global_y'] * row['confidence']
+                        ) / total_confidence
+                        existing['global_z'] = (
+                            existing['global_z'] * existing['confidence']
+                            + row['global_z'] * row['confidence']
+                        ) / total_confidence
+                        existing['confidence'] = total_confidence / 2.0
+                    merged = True
+                    break
+            if not merged:
+                deduped.append(row)
+
+        return deduped
 
     def write_detections_csv(self) -> bool:
         """Write aggregated tracked detections to ``output_csv``. Returns True on success."""
+        tracked = list(self.objects)
         rows = self.aggregate_close_detections()
         csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
         if csv_dir:
@@ -315,7 +352,8 @@ class DetectionProcessor(Node):
             return False
 
         self.get_logger().info(
-            f'Wrote {len(rows)} detection(s) to {self._csv_path}'
+            f'Wrote {len(rows)} detection(s) to {self._csv_path} '
+            f'from {len(tracked)} track(s)'
         )
         return True
 
@@ -361,14 +399,20 @@ class DetectionProcessor(Node):
             wy = world_point.point.y
             wz = world_point.point.z
 
+            matched_object, is_new = self._upsert_tracked_object(
+                detection.class_id,
+                wx,
+                wy,
+                wz,
+                detection.confidence,
+                bbox,
+            )
+
             if is_small or near_edge:
-                matched_object = self.find_matching_object(
-                    detection.class_id, wx, wy
-                )
-                if matched_object is None:
+                if is_new:
                     self.get_logger().info(
-                        f'Small/edge detection without nearby track: '
-                        f'class={detection.class_id}'
+                        f'Small/edge detection: class={detection.class_id}, '
+                        'requesting investigation'
                     )
                     self.publish_investigate_point(world_point)
                 else:
@@ -378,36 +422,9 @@ class DetectionProcessor(Node):
                     )
                 continue
 
-            matched_object = self.find_matching_object(detection.class_id, wx, wy)
-
-            if matched_object is None:
-                self.get_logger().info(
-                    f'New object: class={detection.class_id} '
-                    f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f})'
-                )
-                self.objects.append(
-                    TrackedObject(
-                        class_id=detection.class_id,
-                        global_x=wx,
-                        global_y=wy,
-                        global_z=wz,
-                        confidence=detection.confidence,
-                        bbox=bbox,
-                    )
-                )
+            if is_new:
                 self.publish_resume_exploration()
                 continue
-
-            if detection.confidence > matched_object.confidence:
-                self.get_logger().info(
-                    f'Updating {matched_object.class_id} confidence '
-                    f'{matched_object.confidence:.2f}->{detection.confidence:.2f}'
-                )
-                matched_object.global_x = wx
-                matched_object.global_y = wy
-                matched_object.global_z = wz
-                matched_object.confidence = detection.confidence
-                matched_object.bbox = bbox
 
             if matched_object.pending_confirmation and not matched_object.continue_sent:
                 self.publish_resume_exploration()
