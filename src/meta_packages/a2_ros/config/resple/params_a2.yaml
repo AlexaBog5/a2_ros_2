@@ -19,7 +19,7 @@
       t_lb: [0.0, 0.0, 0.0]
       w_pt: 0.01
     lidar_time_offset: 0.0
-    pcd_save_path: "/tmp/global_map.pcd"
+    pcd_save_path: "/a2_ros/runs/current/global_map.pcd"
 
     knot_hz: 100
     if_lidar_only: false

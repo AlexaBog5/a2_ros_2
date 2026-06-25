@@ -11,7 +11,7 @@ from typing import Optional
 import rclpy
 from a2_interfaces.msg import OperatingMode
 from a2_interfaces.srv import SetOperatingMode
-from direct_lidar_inertial_odometry.srv import SavePCD
+from std_srvs.srv import Empty
 from geometry_msgs.msg import Point, PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -96,7 +96,7 @@ class MissionOrchestrator(Node):
 
         self._mode_client = self.create_client(SetOperatingMode, '/a2/set_mode')
         self._save_pcd_client = self.create_client(
-            SavePCD, self._dlio_save_pcd_service
+            Empty, self._resple_save_pcd_service
         )
         self.create_timer(0.2, self._tick)
         self._publish_detection_enable(False)
@@ -106,7 +106,7 @@ class MissionOrchestrator(Node):
 
     def _declare_parameters(self) -> None:
         """Register ROS parameters (do not declare use_sim_time — launch sets it)."""
-        self.declare_parameter('save_dir', './runs/a2_mission')
+        self.declare_parameter('save_dir', '/a2_ros/runs/current')
         self.declare_parameter('stand_wait_sec', 3.0)
         self.declare_parameter('exploration_finish_topic', '/exploration_finish')
         self.declare_parameter('exploration_timeout_sec', 10.0)
@@ -120,7 +120,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter('planner_select_topic', '/planner/select')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('status_topic', '/mission/status')
-        self.declare_parameter('dlio_save_pcd_service', '/save_pcd')
+        self.declare_parameter('resple_save_pcd_service', '/save_map')
         self.declare_parameter('start_exploration_topic', '/start_exploration')
         self.declare_parameter('home_goal_x', 0.0)
         self.declare_parameter('home_goal_y', 0.0)
@@ -151,7 +151,7 @@ class MissionOrchestrator(Node):
         ).value
         self._map_frame = self.get_parameter('map_frame').value
         self._status_topic = self.get_parameter('status_topic').value
-        self._dlio_save_pcd_service = self.get_parameter('dlio_save_pcd_service').value
+        self._resple_save_pcd_service = self.get_parameter('resple_save_pcd_service').value
         self._start_exploration_topic = self.get_parameter(
             'start_exploration_topic'
         ).value
@@ -386,18 +386,16 @@ class MissionOrchestrator(Node):
         return math.hypot(dx, dy)
 
     def _request_save_map(self) -> bool:
-        """Async call to DLIO SavePCD; result handled in ``_on_save_map_response``."""
+        """Async call to RESPLE save map; result handled in ``_on_save_map_response``."""
         if self._map_save_pending or self._map_save_succeeded is not None:
             return False
         if not self._save_pcd_client.wait_for_service(timeout_sec=0.0):
             self.get_logger().warn(
-                f'Waiting for {self._dlio_save_pcd_service}...'
+                f'Waiting for {self._resple_save_pcd_service}...'
             )
             return False
 
-        req = SavePCD.Request()
-        req.leaf_size = float(self._map_leaf_size)
-        req.save_path = self._save_dir
+        req = Empty.Request()
         self._map_save_pending = True
         future = self._save_pcd_client.call_async(req)
         future.add_done_callback(self._on_save_map_response)
@@ -423,15 +421,9 @@ class MissionOrchestrator(Node):
             self._map_save_succeeded = False
             return
 
-        if response.success:
-            self.get_logger().info(
-                f'Map saved to {self._save_dir}/clean_map.pcd'
-            )
-            self._map_save_succeeded = True
-            return
+        f'Map saved to {self._save_dir}/clean_map.pcd'
 
-        self.get_logger().error('SavePCD returned success=False')
-        self._map_save_succeeded = False
+        self._map_save_succeeded = True
 
     # ------------------------------------------------------------------ state machine (one _tick_* handler per MissionState)
 
@@ -564,7 +556,7 @@ class MissionOrchestrator(Node):
                     if self._state_elapsed() > 5.0:
                         self._transition(MissionState.FAILED, 'map save failed')
                     else:
-                        self._set_status('waiting for SavePCD')
+                        self._set_status('waiting for save_map')
                     return
             if not self._map_save_response_ready():
                 self._set_status('saving map')

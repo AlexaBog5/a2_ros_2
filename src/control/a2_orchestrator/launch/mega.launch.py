@@ -64,7 +64,7 @@ def generate_launch_description():
     )
     detection_csv_arg = DeclareLaunchArgument(
         'detection_csv',
-        default_value='/tmp/a2_mission/detections.csv',
+        default_value='/a2_ros/runs/currnent/detections.csv',
         description='CSV output path for detection_processor',
     )
 
