@@ -209,40 +209,53 @@ class GridGoalManager(Node):
     def build_path_sequence(self):
         self.get_logger().info("Filtering grid against obstacle polygons...")
         
-        # 1. Filter out points too close to boundary segments
+        # 1. Filter out points too close to boundary segments with dynamic fallback scaling for narrow corridors
+        current_inflation = self.inflation_radius
         clean_points = []
-        for p in self.raw_grid_points:
-            in_collision = False
-            for seg in self.latest_segments:
-                A = seg[0]
-                B = seg[1]
-                
-                # Math: Minimum distance from point P to line segment AB
-                vx = B.x - A.x
-                vy = B.y - A.y
-                vz = B.z - A.z
-                
-                wx = p.x - A.x
-                wy = p.y - A.y
-                wz = p.z - A.z
-                
-                v_dot_v = vx*vx + vy*vy + vz*vz
-                if v_dot_v < 1e-6:
-                    # Segment is effectively a point
-                    dist = math.sqrt(wx*wx + wy*wy + wz*wz)
-                else:
-                    t = (wx*vx + wy*vy + wz*vz) / v_dot_v
-                    t = max(0.0, min(1.0, t))
-                    cx = A.x + t * vx
-                    cy = A.y + t * vy
-                    cz = A.z + t * vz
-                    dist = math.sqrt((p.x - cx)**2 + (p.y - cy)**2 + (p.z - cz)**2)
+        
+        while current_inflation >= 0.35:
+            clean_points = []
+            for p in self.raw_grid_points:
+                in_collision = False
+                for seg in self.latest_segments:
+                    A = seg[0]
+                    B = seg[1]
                     
-                if dist < self.inflation_radius:
-                    in_collision = True
-                    break
-            if not in_collision:
-                clean_points.append(p)
+                    vx = B.x - A.x
+                    vy = B.y - A.y
+                    vz = B.z - A.z
+                    
+                    wx = p.x - A.x
+                    wy = p.y - A.y
+                    wz = p.z - A.z
+                    
+                    v_dot_v = vx*vx + vy*vy + vz*vz
+                    if v_dot_v < 1e-6:
+                        dist = math.sqrt(wx*wx + wy*wy + wz*wz)
+                    else:
+                        t = (wx*vx + wy*vy + wz*vz) / v_dot_v
+                        t = max(0.0, min(1.0, t))
+                        cx = A.x + t * vx
+                        cy = A.y + t * vy
+                        cz = A.z + t * vz
+                        dist = math.sqrt((p.x - cx)**2 + (p.y - cy)**2 + (p.z - cz)**2)
+                        
+                    if dist < current_inflation:
+                        in_collision = True
+                        break
+                if not in_collision:
+                    clean_points.append(p)
+            
+            if clean_points:
+                if current_inflation < self.inflation_radius:
+                    self.get_logger().info(
+                        f"Reduced obstacle inflation threshold from {self.inflation_radius:.2f}m to {current_inflation:.2f}m "
+                        f"to resolve {len(clean_points)} navigable corridor waypoints."
+                    )
+                break
+            else:
+                # Decrease threshold by 0.1m per iteration to scale down in tight environments
+                current_inflation -= 0.1
 
         self.get_logger().info(f"Filtering complete. Navigable nodes: {len(clean_points)}/{len(self.raw_grid_points)}")
         
@@ -268,6 +281,29 @@ class GridGoalManager(Node):
             g.header.stamp = self.get_clock().now().to_msg()
             g.point = pt
             self.goal_queue.append(g)
+
+        # Prepend a startup point directly in front of the robot to map the initial environment
+        if self.latest_odom:
+            robot_pos = self.latest_odom.pose.pose.position
+            q = self.latest_odom.pose.pose.orientation
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            
+            # Calculate a point 1.2m straight ahead in the robot's odom frame
+            start_odom = PointStamped()
+            start_odom.header = self.latest_odom.header
+            start_odom.point.x = robot_pos.x + 1.2 * math.cos(yaw)
+            start_odom.point.y = robot_pos.y + 1.2 * math.sin(yaw)
+            start_odom.point.z = robot_pos.z
+            
+            # Transform it to map frame
+            start_map = self.transform_point(start_odom, "map")
+            self.goal_queue.insert(0, start_map)
+            self.get_logger().info(
+                f"Prepended startup waypoint 1.2m directly in front of the robot: "
+                f"({start_map.point.x:.2f}, {start_map.point.y:.2f})"
+            )
 
         self.grid_started = True
         self.exploration_start_time = self.get_clock().now()
@@ -380,6 +416,25 @@ class GridGoalManager(Node):
     def transition_to_next_goal(self):
         self.current_goal = None
         self.is_investigating = False  # Reset investigation status on node transition
+        
+        # Re-sequence remaining waypoints dynamically from the current position
+        if self.goal_queue and self.latest_odom:
+            curr_pose = self.latest_odom.pose.pose.position
+            points_stamped = list(self.goal_queue)
+            sorted_stamped = []
+            
+            while points_stamped:
+                next_stamped = min(points_stamped, key=lambda g: math.sqrt(
+                    (curr_pose.x - g.point.x)**2 + 
+                    (curr_pose.y - g.point.y)**2 + 
+                    (curr_pose.z - g.point.z)**2
+                ))
+                sorted_stamped.append(next_stamped)
+                points_stamped.remove(next_stamped)
+                curr_pose = next_stamped.point
+                
+            self.goal_queue = sorted_stamped
+            
         if self.goal_queue or self.is_going_home:
             self.start_next_goal()
         else:
@@ -550,6 +605,8 @@ class GridGoalManager(Node):
                         self.goal_queue.pop(i)
                         continue
             i += 1
+
+
 
     def control_loop(self):
         # Read parameters dynamically

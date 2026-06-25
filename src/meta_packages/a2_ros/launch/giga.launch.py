@@ -192,7 +192,7 @@ def generate_launch_description():
                 'clearingDis':         8.0,
                 'useSorting':          True,
                 'quantileZ':           0.25,
-                'considerDrop':        True,
+                'considerDrop':        False,
                 'limitGroundLift':     True,
                 'maxGroundLift':       0.25,
                 'clearDyObs':          False,
