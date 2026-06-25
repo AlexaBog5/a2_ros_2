@@ -110,7 +110,7 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
-            'object_detection_classes': "[11, 24, 25, 39, 74]",
+            'object_detection_classes': "[11, 24, 25, 74]",
             'lidar_topic': '/front_lidar/points',
             'input_camera_name': '/camera',
             'debayer_image': 'false',
