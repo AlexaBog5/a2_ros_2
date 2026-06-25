@@ -124,7 +124,7 @@ class DetectionProcessor(Node):
         self._world_match_distance = self.get_parameter('world_match_distance').value
 
         self.objects: list[TrackedObject] = []
-        self._processing_enabled = False  # wait for orchestrator enable signal
+        self._processing_enabled = True  # Enable by default for bags and offline testing
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -368,6 +368,7 @@ class DetectionProcessor(Node):
                         bad=is_bad,
                     )
                 )
+                self.write_detections_csv()
                 if is_bad:
                     self.publish_investigate_point(world_point)
                 else:
@@ -395,6 +396,8 @@ class DetectionProcessor(Node):
                 matched_object.confidence = detection.confidence
                 matched_object.bbox = bbox
                 matched_object.bad = is_bad
+
+                self.write_detections_csv()
 
                 if was_bad and not is_bad:
                     self.publish_resume_exploration()

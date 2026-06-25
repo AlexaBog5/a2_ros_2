@@ -112,7 +112,7 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
-            'object_detection_classes': LaunchConfiguration('object_detection_classes'),
+            'object_detection_classes': '[11, 24, 25, 74, 39]',
             'lidar_topic': '/front_lidar/points',
             'input_camera_name': '/camera',
         }.items(),
