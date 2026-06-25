@@ -128,7 +128,10 @@ def generate_launch_description():
             'investigate_point_topic': '/investigate_point',
             'detection_enable_topic': '/detection/enable',
             'detection_save_topic': '/detection/save',
+            'detection_reset_topic': '/detection/reset',
             'map_frame': 'map',
+            'world_match_distance': 1.5,
+            'tf_lookup_tolerance_sec': 0.1,
             'output_csv': LaunchConfiguration('detection_csv'),
         }],
     )

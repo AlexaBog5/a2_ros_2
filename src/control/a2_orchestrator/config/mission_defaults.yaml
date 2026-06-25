@@ -24,3 +24,4 @@ mission_orchestrator:
     investigate_point_topic: "/investigate_point"
     detection_enable_topic: "/detection/enable"
     detection_save_topic: "/detection/save"
+    detection_reset_topic: "/detection/reset"

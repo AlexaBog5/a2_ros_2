@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 
 import rclpy
+from rclpy.duration import Duration
 from rclpy.time import Time
 import tf2_geometry_msgs
 import tf2_ros
@@ -17,12 +18,13 @@ from object_detection_msgs.msg import ObjectDetectionInfoArray
 from rclpy.node import Node
 from std_msgs.msg import Bool
 
-WORLD_MATCH_DISTANCE_NOISY = 2.0
-WORLD_MATCH_DISTANCE = 1.0
+WORLD_MATCH_DISTANCE = 1.5
+MIN_BBOX_CENTER_SEPARATION_PX = 60.0
 
 CAMERA_WIDTH = 640.0
 CAMERA_HEIGHT = 320.0
 MIN_BBOX_DIMENSION = 30.0
+NO_DEPTH_Z = -1.0
 
 
 @dataclass
@@ -37,8 +39,8 @@ class TrackedObject:
     bbox: tuple
     pending_confirmation: bool = False
     continue_sent: bool = False
-    bad: bool = False  # True when the best observation so far is small or near image edge
-    observation_count: int = 1  # Number of detections matched to this track
+    bad: bool = False
+    observation_count: int = 1
 
 
 def distance_xy(x1: float, y1: float, x2: float, y2: float) -> float:
@@ -50,6 +52,19 @@ def bbox_dimensions(bbox: tuple) -> tuple[float, float]:
     """Return width and height of a bounding box tuple (min_x, min_y, max_x, max_y)."""
     min_x, min_y, max_x, max_y = bbox
     return max_x - min_x, max_y - min_y
+
+
+def bbox_center(bbox: tuple) -> tuple[float, float]:
+    """Return pixel centre of a bounding box."""
+    min_x, min_y, max_x, max_y = bbox
+    return (min_x + max_x) * 0.5, (min_y + max_y) * 0.5
+
+
+def bbox_center_distance(bbox_a: tuple, bbox_b: tuple) -> float:
+    """Return pixel distance between two bounding-box centres."""
+    ax, ay = bbox_center(bbox_a)
+    bx, by = bbox_center(bbox_b)
+    return math.hypot(ax - bx, ay - by)
 
 
 def bbox_near_edge(bbox: tuple, margin: float = 5.0) -> bool:
@@ -75,18 +90,18 @@ def bbox_area(bbox: tuple) -> float:
     return width * height
 
 
+def normalize_class_id(class_id: str) -> str:
+    """Normalize class labels for consistent matching."""
+    return str(class_id).strip().lower()
+
+
 def is_better_observation(
     candidate_bbox: tuple,
     candidate_confidence: float,
     current_bbox: tuple,
     current_confidence: float,
 ) -> bool:
-    """Return True when the candidate observation is strictly better than the current one.
-
-    "Better" means a larger bounding box (closer / more visible) AND higher confidence.
-    Both conditions must hold so that a noisier-but-bigger detection cannot silently
-    downgrade a high-confidence track, and vice-versa.
-    """
+    """Return True when the candidate observation is strictly better than the current one."""
     return (
         bbox_area(candidate_bbox) > bbox_area(current_bbox)
         and candidate_confidence > current_confidence
@@ -96,11 +111,9 @@ def is_better_observation(
 class DetectionProcessor(Node):
     """Subscribe to ``/detection_info``, track objects, and publish ``/investigate_point``.
 
-    Processing is gated by ``/detection/enable`` (published by ``mission_orchestrator``).
-    CSV export is triggered by ``/detection/save`` when exploration ends (before nav home).
-    All valid detections (small, edge, or large) are tracked and written to CSV.
-    Small/edge detections may also trigger investigation; investigation status does
-    not affect whether a detection is saved.
+    Processing is gated by ``/detection/enable``. CSV export is triggered by
+    ``/detection/save`` when exploration ends. Tracks are cleared by
+    ``/detection/reset`` at the start of a new session.
     """
 
     def __init__(self) -> None:
@@ -111,20 +124,28 @@ class DetectionProcessor(Node):
         self.declare_parameter('investigate_point_topic', '/investigate_point')
         self.declare_parameter('detection_enable_topic', '/detection/enable')
         self.declare_parameter('detection_save_topic', '/detection/save')
-        self.declare_parameter('map_frame', 'dilio_map')
+        self.declare_parameter('detection_reset_topic', '/detection/reset')
+        self.declare_parameter('map_frame', 'map')
         self.declare_parameter('output_csv', 'detections.csv')
-        self.declare_parameter('world_match_distance', WORLD_MATCH_DISTANCE_NOISY)
+        self.declare_parameter('world_match_distance', WORLD_MATCH_DISTANCE)
+        self.declare_parameter('tf_lookup_tolerance_sec', 0.1)
 
         self._detection_info_topic = self.get_parameter('detection_info_topic').value
         self._investigate_point_topic = self.get_parameter('investigate_point_topic').value
         self._detection_enable_topic = self.get_parameter('detection_enable_topic').value
         self._detection_save_topic = self.get_parameter('detection_save_topic').value
+        self._detection_reset_topic = self.get_parameter('detection_reset_topic').value
         self._map_frame = self.get_parameter('map_frame').value
         self._csv_path = self.get_parameter('output_csv').value
-        self._world_match_distance = self.get_parameter('world_match_distance').value
+        self._world_match_distance = float(
+            self.get_parameter('world_match_distance').value
+        )
+        self._tf_lookup_tolerance_sec = float(
+            self.get_parameter('tf_lookup_tolerance_sec').value
+        )
 
         self.objects: list[TrackedObject] = []
-        self._processing_enabled = False  # wait for orchestrator enable signal
+        self._processing_enabled = False
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -147,6 +168,12 @@ class DetectionProcessor(Node):
             self._save_callback,
             10,
         )
+        self.create_subscription(
+            Bool,
+            self._detection_reset_topic,
+            self._reset_callback,
+            10,
+        )
 
         self._investigate_point_pub = self.create_publisher(
             PointStamped,
@@ -162,25 +189,40 @@ class DetectionProcessor(Node):
 
         self.get_logger().info(
             f'DetectionProcessor ready: sub={self._detection_info_topic}, '
-            f'pub={self._investigate_point_topic}, '
-            f'enable={self._detection_enable_topic}, '
-            f'save={self._detection_save_topic} (waiting for enable)'
+            f'csv={self._csv_path}, map_frame={self._map_frame}, '
+            f'match={self._world_match_distance:.1f}m'
         )
 
     def _save_callback(self, msg: Bool) -> None:
-        """Write tracked detections to CSV when commanded by the mission orchestrator."""
+        """Write tracked detections to CSV when commanded."""
         if not msg.data:
             return
+        self.get_logger().info(
+            f'Save requested ({len(self.objects)} track(s) in memory)'
+        )
         self.write_detections_csv()
 
+    def _reset_callback(self, msg: Bool) -> None:
+        """Clear tracked objects when a new exploration session starts."""
+        if not msg.data:
+            return
+        self.reset_tracks()
+
     def _enable_callback(self, msg: Bool) -> None:
-        """Latch enable flag from orchestrator; save and clear tracks when processing stops."""
+        """Latch enable flag; do not clear tracks here (reset/save handle that)."""
         if msg.data == self._processing_enabled:
             return
         self._processing_enabled = msg.data
         self.get_logger().info(
             f'Detection processing {"enabled" if msg.data else "disabled"}'
         )
+
+    def reset_tracks(self) -> None:
+        """Clear all tracked objects."""
+        count = len(self.objects)
+        self.objects.clear()
+        if count:
+            self.get_logger().info(f'Cleared {count} tracked object(s) for new session')
 
     def transform_point_to_map(
         self, x: float, y: float, z: float, source_frame: str, stamp
@@ -193,46 +235,84 @@ class DetectionProcessor(Node):
         point.point.y = y
         point.point.z = z
 
-        # Try exact timestamp first, but if unavailable, fall back to the
-        # latest/closest available transform so processing isn't blocked by
-        # strict timestamp matching.
-        try:
-            transform = self._tf_buffer.lookup_transform(
-                self._map_frame,
-                point.header.frame_id,
-                stamp,
-            )
-            return tf2_geometry_msgs.do_transform_point(point, transform)
-        except Exception as ex:  # noqa: BLE001
-            self.get_logger().warn(
-                f'Exact transform to {self._map_frame} failed: {ex} - trying latest available transform'
-            )
+        lookup_times = [
+            Time.from_msg(stamp),
+            Time.from_msg(stamp) - Duration(seconds=self._tf_lookup_tolerance_sec),
+            Time.from_msg(stamp) + Duration(seconds=self._tf_lookup_tolerance_sec),
+        ]
+
+        for lookup_time in lookup_times:
             try:
-                latest = Time()
                 transform = self._tf_buffer.lookup_transform(
                     self._map_frame,
                     point.header.frame_id,
-                    latest,
+                    lookup_time,
                 )
-                self.get_logger().info('Using latest available transform as fallback')
                 return tf2_geometry_msgs.do_transform_point(point, transform)
-            except Exception as ex2:  # noqa: BLE001
-                self.get_logger().warn(
-                    f'Fallback transform to {self._map_frame} failed: {ex2}'
-                )
-                return None
+            except Exception:  # noqa: BLE001
+                continue
+
+        self.get_logger().warn(
+            f'Could not transform {source_frame} -> {self._map_frame} at detection time; '
+            'skipping (latest TF would collapse distinct objects)'
+        )
+        return None
+
+    def _same_physical_object(
+        self,
+        candidate: TrackedObject,
+        class_id: str,
+        wx: float,
+        wy: float,
+        bbox: tuple,
+        *,
+        same_frame: bool,
+    ) -> bool:
+        """Return True if ``candidate`` is the same instance as the new observation."""
+        if normalize_class_id(candidate.class_id) != class_id:
+            return False
+
+        if distance_xy(wx, wy, candidate.global_x, candidate.global_y) >= (
+            self._world_match_distance
+        ):
+            return False
+
+        if same_frame and bbox_center_distance(
+            bbox, candidate.bbox
+        ) >= MIN_BBOX_CENTER_SEPARATION_PX:
+            return False
+
+        return True
 
     def find_matching_object(
-        self, class_id: str, x: float, y: float
+        self,
+        class_id: str,
+        wx: float,
+        wy: float,
+        bbox: tuple,
+        extra_tracks: list[TrackedObject] | None = None,
     ) -> TrackedObject | None:
-        """Return the closest tracked object of ``class_id`` within match distance."""
+        """Return the best matching track for this observation, if any."""
+        same_frame_ids = {id(obj) for obj in (extra_tracks or [])}
+
+        candidates = list(self.objects)
+        if extra_tracks:
+            candidates.extend(extra_tracks)
+
         best_match: TrackedObject | None = None
         best_distance = self._world_match_distance
 
-        for obj in self.objects:
-            if obj.class_id != class_id:
+        for obj in candidates:
+            if not self._same_physical_object(
+                obj,
+                class_id,
+                wx,
+                wy,
+                bbox,
+                same_frame=id(obj) in same_frame_ids,
+            ):
                 continue
-            dist = distance_xy(x, y, obj.global_x, obj.global_y)
+            dist = distance_xy(wx, wy, obj.global_x, obj.global_y)
             if dist < best_distance:
                 best_distance = dist
                 best_match = obj
@@ -256,12 +336,9 @@ class DetectionProcessor(Node):
             f'Publishing {self._investigate_point_topic}: origin (resume exploration)'
         )
 
-    def destroy_node(self):
-        """Shut down without writing CSV (orchestrator triggers save via ``/detection/save``)."""
-        return super().destroy_node()
-
     def write_detections_csv(self) -> bool:
-        """Write tracked objects to ``output_csv``. Returns True on success."""
+        """Write one CSV row per tracked object. Returns True on success."""
+        tracked = list(self.objects)
         csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
         if csv_dir:
             os.makedirs(csv_dir, exist_ok=True)
@@ -269,7 +346,7 @@ class DetectionProcessor(Node):
             with open(self._csv_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self._csv_headers)
                 writer.writeheader()
-                for obj in self.objects:
+                for obj in tracked:
                     writer.writerow(
                         {
                             'class': obj.class_id,
@@ -289,37 +366,33 @@ class DetectionProcessor(Node):
             return False
 
         self.get_logger().info(
-            f'Wrote {len(self.objects)} detection(s) to {self._csv_path}'
+            f'Wrote {len(tracked)} detection(s) to {self._csv_path}'
         )
+        for idx, obj in enumerate(tracked, start=1):
+            self.get_logger().info(
+                f'  [{idx}] {obj.class_id} '
+                f'({obj.global_x:.2f}, {obj.global_y:.2f}, {obj.global_z:.2f})'
+            )
         return True
 
     def detection_callback(self, msg: ObjectDetectionInfoArray) -> None:
-        """Process YOLO detections when enabled; publish investigate or resume signals.
-
-        Every detection that passes depth/transform checks is stored or used to
-        upgrade an existing track.  A track is upgraded when the new observation is
-        both larger (bigger bbox area) and more confident than the stored one.
-        The ``bad`` flag on a track is set when the best observation seen so far is
-        still small or near the image edge; it is cleared as soon as a good
-        observation arrives.
-
-        Publish behaviour:
-        - New object (good observation)      → resume exploration (object noted, keep going)
-        - New object (bad observation)       → investigate point (get closer for a better look)
-        - Existing, bad→good upgrade         → resume exploration (confirmed, keep going)
-        - Existing, still bad after upgrade  → investigate point (still need a better view)
-        - Existing, no quality change        → nothing published
-        """
+        """Process YOLO detections when enabled; publish investigate or resume signals."""
         if not self._processing_enabled:
             return
 
         source_frame = msg.header.frame_id
         stamp = msg.header.stamp
+        if len(msg.info) == 0:
+            return
+
         self.get_logger().info(
-            f'Received {len(msg.info)} detections from {source_frame}'
+            f'Received {len(msg.info)} detection(s) from {source_frame}'
         )
 
+        created_this_msg: list[TrackedObject] = []
+
         for detection in msg.info:
+            class_id = normalize_class_id(detection.class_id)
             bbox = (
                 detection.bounding_box_min_x,
                 detection.bounding_box_min_y,
@@ -327,9 +400,9 @@ class DetectionProcessor(Node):
                 detection.bounding_box_max_y,
             )
 
-            if detection.position.z == -1:
+            if abs(detection.position.z - NO_DEPTH_Z) < 1e-3:
                 self.get_logger().info(
-                    f'Skipping class={detection.class_id} id={detection.id}: no depth'
+                    f'Skipping class={class_id} id={detection.id}: no depth'
                 )
                 continue
 
@@ -349,24 +422,25 @@ class DetectionProcessor(Node):
             wy = world_point.point.y
             wz = world_point.point.z
 
-            matched_object = self.find_matching_object(detection.class_id, wx, wy)
+            matched_object = self.find_matching_object(
+                class_id, wx, wy, bbox, extra_tracks=created_this_msg
+            )
 
             if matched_object is None:
-                # First time we see this object — always store it.
-                self.get_logger().info(
-                    f'New object: class={detection.class_id} '
-                    f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f}) bad={is_bad}'
+                obj = TrackedObject(
+                    class_id=class_id,
+                    global_x=wx,
+                    global_y=wy,
+                    global_z=wz,
+                    confidence=detection.confidence,
+                    bbox=bbox,
+                    bad=is_bad,
                 )
-                self.objects.append(
-                    TrackedObject(
-                        class_id=detection.class_id,
-                        global_x=wx,
-                        global_y=wy,
-                        global_z=wz,
-                        confidence=detection.confidence,
-                        bbox=bbox,
-                        bad=is_bad,
-                    )
+                self.objects.append(obj)
+                created_this_msg.append(obj)
+                self.get_logger().info(
+                    f'New track ({len(self.objects)} total): class={class_id} '
+                    f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f}) bad={is_bad}'
                 )
                 if is_bad:
                     self.publish_investigate_point(world_point)
@@ -374,7 +448,6 @@ class DetectionProcessor(Node):
                     self.publish_resume_exploration()
                 continue
 
-            # Existing track — always count the observation, upgrade if better.
             matched_object.observation_count += 1
             if is_better_observation(
                 bbox,
@@ -383,12 +456,6 @@ class DetectionProcessor(Node):
                 matched_object.confidence,
             ):
                 was_bad = matched_object.bad
-                self.get_logger().info(
-                    f'Upgrading {matched_object.class_id}: '
-                    f'conf {matched_object.confidence:.2f}->{detection.confidence:.2f}, '
-                    f'area {bbox_area(matched_object.bbox):.0f}->{bbox_area(bbox):.0f}, '
-                    f'bad {was_bad}->{is_bad}'
-                )
                 matched_object.global_x = wx
                 matched_object.global_y = wy
                 matched_object.global_z = wz
@@ -400,14 +467,7 @@ class DetectionProcessor(Node):
                     self.publish_resume_exploration()
                 elif is_bad:
                     self.publish_investigate_point(world_point)
-                # good→good upgrade: no publish needed.
-            else:
-                self.get_logger().info(
-                    f'Observation not better than existing track for '
-                    f'class={matched_object.class_id}; no update'
-                )
-
-            if matched_object.pending_confirmation and not matched_object.continue_sent:
+            elif matched_object.pending_confirmation and not matched_object.continue_sent:
                 self.publish_resume_exploration()
                 matched_object.pending_confirmation = False
                 matched_object.continue_sent = True

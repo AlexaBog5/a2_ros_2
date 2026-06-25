@@ -80,6 +80,11 @@ class MissionOrchestrator(Node):
         self._detection_save_pub = self.create_publisher(
             Bool, self._detection_save_topic, 10
         )
+        self._detection_reset_pub = self.create_publisher(
+            Bool, self._detection_reset_topic, 10
+        )
+
+        self._detection_latched_enabled = False
 
         self.create_subscription(
             Odometry, self._odom_topic, self._odom_callback, qos_sensor
@@ -128,6 +133,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter('investigate_point_topic', '/investigate_point')
         self.declare_parameter('detection_enable_topic', '/detection/enable')
         self.declare_parameter('detection_save_topic', '/detection/save')
+        self.declare_parameter('detection_reset_topic', '/detection/reset')
 
     def _load_parameters(self) -> None:
         """Read declared parameters into instance fields and create save_dir."""
@@ -167,6 +173,7 @@ class MissionOrchestrator(Node):
             'detection_enable_topic'
         ).value
         self._detection_save_topic = self.get_parameter('detection_save_topic').value
+        self._detection_reset_topic = self.get_parameter('detection_reset_topic').value
 
         os.makedirs(self._save_dir, exist_ok=True)
 
@@ -181,10 +188,15 @@ class MissionOrchestrator(Node):
 
     def _transition(self, new_state: MissionState, detail: str = '') -> None:
         """Enter ``new_state``, reset state timer, publish status, and sync detection hooks."""
+        prev_state = self._state
         self._state = new_state
         self._state_entered_mono = time.monotonic()
         self._set_status(detail or new_state.name.lower())
-        if new_state in (MissionState.EXPLORING, MissionState.INVESTIGATING):
+        if new_state == MissionState.EXPLORING:
+            if prev_state != MissionState.INVESTIGATING:
+                self._publish_detection_reset()
+            self._publish_detection_enable(True)
+        elif new_state == MissionState.INVESTIGATING:
             self._publish_detection_enable(True)
         elif new_state == MissionState.SAVE_MAP:
             self._publish_detection_save()
@@ -234,15 +246,23 @@ class MissionOrchestrator(Node):
         goal.point = point
         self._goal_pub.publish(goal)
 
-    def _publish_detection_enable(self, enabled: bool) -> None:
-        """Tell ``detection_processor`` whether to track detections and publish investigate points."""
+    def _publish_detection_enable(self, enabled: bool, *, log_change: bool = True) -> None:
+        """Tell ``detection_processor`` whether to track detections."""
         msg = Bool()
         msg.data = enabled
         self._detection_enable_pub.publish(msg)
-        self.get_logger().info(
-            f'Detection processing {"enabled" if enabled else "disabled"} '
-            f'on {self._detection_enable_topic}'
-        )
+        if log_change and enabled != self._detection_latched_enabled:
+            self.get_logger().info(
+                f'Detection processing {"enabled" if enabled else "disabled"} '
+                f'on {self._detection_enable_topic}'
+            )
+            self._detection_latched_enabled = enabled
+
+    def _publish_detection_enable_keepalive(self) -> None:
+        """Republish enable during exploration (matches giga grid_goal_manager behaviour)."""
+        if not self._detection_latched_enabled:
+            return
+        self._publish_detection_enable(True, log_change=False)
 
     def _publish_detection_save(self) -> None:
         """Tell ``detection_processor`` to write tracked detections to CSV before nav home."""
@@ -251,6 +271,15 @@ class MissionOrchestrator(Node):
         self._detection_save_pub.publish(msg)
         self.get_logger().info(
             f'Detection save requested on {self._detection_save_topic}'
+        )
+
+    def _publish_detection_reset(self) -> None:
+        """Clear detection tracks at the start of a new exploration session."""
+        msg = Bool()
+        msg.data = True
+        self._detection_reset_pub.publish(msg)
+        self.get_logger().info(
+            f'Detection track reset requested on {self._detection_reset_topic}'
         )
 
     @staticmethod
@@ -536,6 +565,7 @@ class MissionOrchestrator(Node):
             return
         if self._check_exploration_timeout():
             return
+        self._publish_detection_enable_keepalive()
         self._set_status(
             f'exploring ({self._exploring_elapsed():.0f}s, '
             f'limit={self._exploration_timeout_sec:.0f}s)'
@@ -546,10 +576,10 @@ class MissionOrchestrator(Node):
         if self._check_exploration_timeout():
             return
         if self._state_elapsed() >= INVESTIGATION_TIMEOUT_SEC:
-            self._transition(MissionState.EXPLORING, 'investigation timeout')
             self._select_planner('tare')
-            self._transition(MissionState.EXPLORING, 'resumed exploration')
+            self._transition(MissionState.EXPLORING, 'investigation timeout')
             return
+        self._publish_detection_enable_keepalive()
         self._set_status(
             f'investigating ({self._state_elapsed():.0f}s, '
             f'limit={INVESTIGATION_TIMEOUT_SEC:.0f}s)'
