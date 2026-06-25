@@ -21,6 +21,10 @@ mission_orchestrator:
     home_goal_x: 0.0
     home_goal_y: 0.0
     home_goal_z: 0.0
+    use_pre_explore_goal: true
+    pre_explore_goal_x: 2.0
+    pre_explore_goal_y: 0.0
+    pre_explore_goal_z: 0.0
     investigate_point_topic: "/investigate_point"
     detection_enable_topic: "/detection/enable"
     detection_save_topic: "/detection/save"

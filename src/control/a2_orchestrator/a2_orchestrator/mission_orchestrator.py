@@ -21,7 +21,7 @@ from std_msgs.msg import Bool, String
 from a2_orchestrator.mission_state import MissionState
 
 RESUME_ORIGIN_EPSILON = 1e-3
-INVESTIGATION_TIMEOUT_SEC = 30.0
+INVESTIGATION_TIMEOUT_SEC = 15.0
 
 
 class MissionOrchestrator(Node):
@@ -58,6 +58,7 @@ class MissionOrchestrator(Node):
         self._done_logged = False
         self._start_explore_done = False
         self._nav_setup_done = False
+        self._nav_pre_explore_setup_done = False
         self._sit_balance_done = False
 
         qos_sensor = QoSProfile(
@@ -130,6 +131,10 @@ class MissionOrchestrator(Node):
         self.declare_parameter('home_goal_x', 0.0)
         self.declare_parameter('home_goal_y', 0.0)
         self.declare_parameter('home_goal_z', 0.0)
+        self.declare_parameter('use_pre_explore_goal', True)
+        self.declare_parameter('pre_explore_goal_x', 2.0)
+        self.declare_parameter('pre_explore_goal_y', 0.0)
+        self.declare_parameter('pre_explore_goal_z', 0.0)
         self.declare_parameter('investigate_point_topic', '/investigate_point')
         self.declare_parameter('detection_enable_topic', '/detection/enable')
         self.declare_parameter('detection_save_topic', '/detection/save')
@@ -165,6 +170,12 @@ class MissionOrchestrator(Node):
             x=float(self.get_parameter('home_goal_x').value),
             y=float(self.get_parameter('home_goal_y').value),
             z=float(self.get_parameter('home_goal_z').value),
+        )
+        self._use_pre_explore_goal = self.get_parameter('use_pre_explore_goal').value
+        self._pre_explore_goal = Point(
+            x=float(self.get_parameter('pre_explore_goal_x').value),
+            y=float(self.get_parameter('pre_explore_goal_y').value),
+            z=float(self.get_parameter('pre_explore_goal_z').value),
         )
         self._investigate_point_topic = self.get_parameter(
             'investigate_point_topic'
@@ -411,13 +422,17 @@ class MissionOrchestrator(Node):
         )
         return True
 
-    def _distance_to_home(self) -> Optional[float]:
-        """XY distance from current odom to ``_home``; None if odom unavailable."""
+    def _distance_to_point(self, point: Point) -> Optional[float]:
+        """XY distance from current odom to ``point``; None if odom unavailable."""
         if self._last_odom is None:
             return None
-        dx = self._last_odom.pose.pose.position.x - self._home.x
-        dy = self._last_odom.pose.pose.position.y - self._home.y
+        dx = self._last_odom.pose.pose.position.x - point.x
+        dy = self._last_odom.pose.pose.position.y - point.y
         return math.hypot(dx, dy)
+
+    def _distance_to_home(self) -> Optional[float]:
+        """XY distance from current odom to ``_home``; None if odom unavailable."""
+        return self._distance_to_point(self._home)
 
     def _request_save_map(self) -> bool:
         """Async call to RESPLE save map; result handled in ``_on_save_map_response``."""
@@ -446,18 +461,17 @@ class MissionOrchestrator(Node):
         return succeeded
 
     def _on_save_map_response(self, future) -> None:
-        """Service callback: latch success/failure for ``_tick_save_map``."""
+        """Service callback: log result only (state machine does not wait)."""
         self._map_save_pending = False
         try:
-            response = future.result()
+            future.result()
+            self.get_logger().info(
+                f'Map saved to {self._save_dir}/clean_map.pcd'
+            )
+            self._map_save_succeeded = True
         except Exception as ex:  # noqa: BLE001
             self.get_logger().error(f'SavePCD failed: {ex}')
             self._map_save_succeeded = False
-            return
-
-        f'Map saved to {self._save_dir}/clean_map.pcd'
-
-        self._map_save_succeeded = True
 
     # ------------------------------------------------------------------ state machine (one _tick_* handler per MissionState)
 
@@ -473,6 +487,7 @@ class MissionOrchestrator(Node):
             MissionState.UNLOCK: self._tick_unlock,
             MissionState.WALK: self._tick_walk,
             MissionState.RECORD_HOME: self._tick_record_home,
+            MissionState.NAV_PRE_EXPLORE: self._tick_nav_pre_explore,
             MissionState.START_EXPLORE: self._tick_start_explore,
             MissionState.EXPLORING: self._tick_exploring,
             MissionState.INVESTIGATING: self._tick_investigating,
@@ -539,13 +554,50 @@ class MissionOrchestrator(Node):
         self._transition(MissionState.RECORD_HOME, 'walk accepted')
 
     def _tick_record_home(self) -> None:
-        """Write ``origin.txt`` from current odom. Next: START_EXPLORE."""
+        """Write ``origin.txt`` from current odom. Next: NAV_PRE_EXPLORE or START_EXPLORE."""
         if not self._record_home():
             self._set_status('waiting for odometry')
             return
         self._exploration_finished = False
         self._start_explore_done = False
+        self._nav_pre_explore_setup_done = False
+        if self._use_pre_explore_goal:
+            self._transition(
+                MissionState.NAV_PRE_EXPLORE,
+                f'navigating to pre-explore goal '
+                f'({self._pre_explore_goal.x:.2f}, {self._pre_explore_goal.y:.2f})',
+            )
+            return
         self._transition(MissionState.START_EXPLORE)
+
+    def _tick_nav_pre_explore(self) -> None:
+        """FAR to pre-explore goal, then TARE. Next: START_EXPLORE or FAILED."""
+        if self._state_elapsed() > self._nav_home_timeout_sec:
+            self._transition(MissionState.FAILED, 'pre-explore nav timeout')
+            return
+
+        if not self._nav_pre_explore_setup_done:
+            self._select_planner('far')
+            time.sleep(1)
+            self._publish_goal_point(self._pre_explore_goal)
+            self._nav_pre_explore_setup_done = True
+            self._set_status('FAR pre-explore goal published')
+            return
+
+        dist = self._distance_to_point(self._pre_explore_goal)
+        if dist is not None and dist <= self._home_threshold:
+            self._transition(
+                MissionState.START_EXPLORE,
+                f'pre-explore goal reached ({dist:.2f} m)',
+            )
+            return
+
+        detail = (
+            f'navigating to pre-explore goal ({dist:.2f} m)'
+            if dist is not None
+            else 'navigating to pre-explore goal'
+        )
+        self._set_status(detail)
 
     def _tick_start_explore(self) -> None:
         """Once: ``/planner/select=tare``, ``/start_exploration=true``. Next: EXPLORING."""
@@ -586,29 +638,18 @@ class MissionOrchestrator(Node):
         )
 
     def _tick_save_map(self) -> None:
-        """Request SavePCD once (async). Next: NAV_HOME, SIT_DOWN, or FAILED."""
+        """Fire SavePCD once (async, no wait). Next: NAV_HOME or SIT_DOWN."""
         if not self._map_save_done:
-            if self._map_save_succeeded is None and not self._map_save_pending:
-                if not self._request_save_map():
-                    if self._state_elapsed() > 5.0:
-                        self._transition(MissionState.FAILED, 'map save failed')
-                    else:
-                        self._set_status('waiting for save_map')
-                    return
-            if not self._map_save_response_ready():
-                self._set_status('saving map')
-                return
-            if not self._consume_map_save_response():
-                self._transition(MissionState.FAILED, 'map save failed')
-                return
+            if not self._map_save_pending:
+                self._request_save_map()
             self._map_save_done = True
         if self._skip_home:
             self._sit_balance_done = False
-            self._transition(MissionState.SIT_DOWN, 'map saved, skip_home')
+            self._transition(MissionState.SIT_DOWN, 'map save requested, skip_home')
             return
         self._nav_setup_done = False
         self._nav_goal_sent = False
-        self._transition(MissionState.NAV_HOME, 'map saved, navigating home')
+        self._transition(MissionState.NAV_HOME, 'map save requested, navigating home')
 
     def _tick_nav_home(self) -> None:
         """Once: select FAR and publish home goal; then wait for arrival. Next: SIT_DOWN or FAILED."""

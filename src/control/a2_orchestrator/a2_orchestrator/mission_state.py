@@ -12,6 +12,7 @@ class MissionState(Enum):
     UNLOCK = auto()
     WALK = auto()
     RECORD_HOME = auto()
+    NAV_PRE_EXPLORE = auto()
     START_EXPLORE = auto()
     EXPLORING = auto()
     INVESTIGATING = auto()
