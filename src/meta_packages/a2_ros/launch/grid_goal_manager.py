@@ -582,8 +582,8 @@ class GridGoalManager(Node):
             if not self.latest_odom:
                 return
                 
-            # 1. Check if the active goal was dynamically blocked
-            if self.is_point_occluded(self.current_goal.point):
+            # 1. Check if the active goal was dynamically blocked (skip check if investigating a target)
+            if not self.is_investigating and self.is_point_occluded(self.current_goal.point):
                 self.get_logger().warn("Active goal node is now occluded! Skipping immediately.")
                 self.transition_to_next_goal()
                 return
@@ -631,8 +631,8 @@ class GridGoalManager(Node):
         if self.grid_started and self.goal_queue:
             self.check_dynamic_occlusion()
             
-        # Line of Sight pruning for pending queue
-        if self.grid_started and self.goal_queue:
+        # Line of Sight pruning for pending queue (only when not actively investigating a target)
+        if self.grid_started and self.goal_queue and not self.is_investigating:
             self.check_los_pruning()
                 
         self.publish_markers()
