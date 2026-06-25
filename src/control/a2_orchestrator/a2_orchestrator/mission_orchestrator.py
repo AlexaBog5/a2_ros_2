@@ -188,6 +188,11 @@ class MissionOrchestrator(Node):
             self._publish_detection_enable(True)
         elif new_state == MissionState.SAVE_MAP:
             self._publish_detection_save()
+        elif new_state in (
+            MissionState.NAV_HOME,
+            MissionState.SIT_DOWN,
+            MissionState.FAILED,
+        ):
             self._publish_detection_enable(False)
 
     def _elapsed(self) -> float:
@@ -542,6 +547,8 @@ class MissionOrchestrator(Node):
             return
         if self._state_elapsed() >= INVESTIGATION_TIMEOUT_SEC:
             self._transition(MissionState.EXPLORING, 'investigation timeout')
+            self._select_planner('tare')
+            self._transition(MissionState.EXPLORING, 'resumed exploration')
             return
         self._set_status(
             f'investigating ({self._state_elapsed():.0f}s, '
