@@ -262,11 +262,28 @@ class DetectionProcessor(Node):
 
     def write_detections_csv(self) -> bool:
         """Write tracked objects to ``output_csv``. Returns True on success."""
-        csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
-        if csv_dir:
-            os.makedirs(csv_dir, exist_ok=True)
+        csv_path = self._csv_path
+        csv_dir = os.path.dirname(os.path.abspath(csv_path))
+        
+        # Test if the directory is writable, or if we can create it
         try:
-            with open(self._csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+            if csv_dir:
+                os.makedirs(csv_dir, exist_ok=True)
+        except OSError:
+            # Fallback to local user home directory if root-level directory /a2_ros is not writable
+            fallback_dir = os.path.expanduser('~/a2_runs')
+            try:
+                os.makedirs(fallback_dir, exist_ok=True)
+                csv_path = os.path.join(fallback_dir, 'detections.csv')
+                self.get_logger().warn(
+                    f"Default CSV path {self._csv_path} not writable. Falling back to {csv_path}"
+                )
+            except OSError as ex2:
+                self.get_logger().error(f'Failed to create fallback directory: {ex2}')
+                return False
+
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self._csv_headers)
                 writer.writeheader()
                 for obj in self.objects:
@@ -285,11 +302,11 @@ class DetectionProcessor(Node):
                         }
                     )
         except OSError as ex:
-            self.get_logger().error(f'Failed to write detection CSV: {ex}')
+            self.get_logger().error(f'Failed to write detection CSV to {csv_path}: {ex}')
             return False
 
         self.get_logger().info(
-            f'Wrote {len(self.objects)} detection(s) to {self._csv_path}'
+            f'Wrote {len(self.objects)} detection(s) to {csv_path}'
         )
         return True
 
