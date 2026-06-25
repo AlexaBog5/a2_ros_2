@@ -10,7 +10,11 @@ Starts:
   - RViz (optional)
 
 Usage:
-  ros2 launch a2_ros giga.launch.py use_sim_time:=true rviz:=true
+  a2 sim --scene scene_test_meshes.xml 
+
+
+  ros2 launch a2_ros giga.launch.py use_sim_time:=true sim_detection:=true exploration_timeout:=60.0
+
 """
 
 import os

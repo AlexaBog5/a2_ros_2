@@ -19,6 +19,8 @@ from std_msgs.msg import Bool, String
 
 WORLD_MATCH_DISTANCE_NOISY = 2.0
 WORLD_MATCH_DISTANCE = 1.0
+# Only merge CSV rows closer than this (duplicate re-observations of one object).
+CSV_DEDUPE_DISTANCE = 0.4
 
 CAMERA_WIDTH = 640.0
 CAMERA_HEIGHT = 320.0
@@ -98,8 +100,9 @@ class DetectionProcessor(Node):
 
     Processing is gated by ``/detection/enable`` (published by ``mission_orchestrator``).
     CSV export is triggered by ``/detection/save`` when exploration ends (before nav home).
-    While disabled, detections are ignored so objects visible during stand/walk do not
-    trigger investigation. When disabled, tracked objects are cleared.
+    All valid detections (small, edge, or large) are tracked and written to CSV.
+    Small/edge detections may also trigger investigation; investigation status does
+    not affect whether a detection is saved.
     """
 
     def __init__(self) -> None:
@@ -112,6 +115,7 @@ class DetectionProcessor(Node):
         self.declare_parameter('detection_save_topic', '/detection/save')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('output_csv', 'detections.csv')
+        self.declare_parameter('world_match_distance', WORLD_MATCH_DISTANCE)
 
         self._detection_info_topic = self.get_parameter('detection_info_topic').value
         self._investigate_point_topic = self.get_parameter(
@@ -124,8 +128,23 @@ class DetectionProcessor(Node):
         self._map_frame = self.get_parameter('map_frame').value
         self._csv_path = self.get_parameter('output_csv').value
 
+        # Create CSV directory and file with header at start
+        csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
+        if csv_dir:
+            try:
+                os.makedirs(csv_dir, exist_ok=True)
+            except OSError as ex:
+                self.get_logger().error(f'Failed to create directory {csv_dir}: {ex}')
+        try:
+            with open(self._csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=['class', 'x', 'y', 'z'])
+                writer.writeheader()
+            self.get_logger().info(f'Initialized empty CSV file at {self._csv_path}')
+        except OSError as ex:
+            self.get_logger().error(f'Failed to initialize CSV file: {ex}')
+
         self.objects: list[TrackedObject] = []
-        self._processing_enabled = False
+        self._processing_enabled = True
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -169,10 +188,12 @@ class DetectionProcessor(Node):
         self.write_detections_csv()
 
     def _enable_callback(self, msg: Bool) -> None:
-        """Latch enable flag from orchestrator; clear tracks when processing stops."""
+        """Latch enable flag from orchestrator; clear tracks when a new session starts."""
         if msg.data == self._processing_enabled:
             return
+
         self._processing_enabled = msg.data
+
 
         self.get_logger().info(
             f'Detection processing {"enabled" if msg.data else "disabled"}'
@@ -218,16 +239,61 @@ class DetectionProcessor(Node):
                 )
                 return None
 
+    def _upsert_tracked_object(
+        self,
+        class_id: str,
+        wx: float,
+        wy: float,
+        wz: float,
+        confidence: float,
+        bbox: tuple,
+    ) -> tuple[TrackedObject, bool]:
+        """Insert or update a tracked object. Returns ``(object, is_new)``."""
+        matched_object = self.find_matching_object(class_id, wx, wy)
+
+        if matched_object is None:
+            obj = TrackedObject(
+                class_id=class_id,
+                global_x=wx,
+                global_y=wy,
+                global_z=wz,
+                confidence=confidence,
+                bbox=bbox,
+            )
+            self.objects.append(obj)
+            self.get_logger().info(
+                f'New track ({len(self.objects)} total): class={class_id} '
+                f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f}) conf={confidence:.2f}'
+            )
+            return obj, True
+
+        self.get_logger().debug(
+            f'Updating track class={class_id} '
+            f'pos=({wx:.2f}, {wy:.2f}, {wz:.2f}) conf={confidence:.2f}'
+        )
+        matched_object.global_x = wx
+        matched_object.global_y = wy
+        matched_object.global_z = wz
+        matched_object.confidence = max(matched_object.confidence, confidence)
+        matched_object.bbox = bbox
+        return matched_object, False
+
     def find_matching_object(
         self, class_id: str, x: float, y: float
     ) -> TrackedObject | None:
-        """Return a tracked object of ``class_id`` within ``WORLD_MATCH_DISTANCE_NOISY`` of (x, y)."""
+        """Return the closest tracked object of ``class_id`` within match distance."""
+        best_match: TrackedObject | None = None
+        best_distance = self._world_match_distance
+
         for obj in self.objects:
             if obj.class_id != class_id:
                 continue
-            if distance_xy(x, y, obj.global_x, obj.global_y) < WORLD_MATCH_DISTANCE_NOISY:
-                return obj
-        return None
+            dist = distance_xy(x, y, obj.global_x, obj.global_y)
+            if dist < best_distance:
+                best_distance = dist
+                best_match = obj
+
+        return best_match
 
     def publish_investigate_point(self, waypoint: PointStamped) -> None:
         """Publish a non-origin map point so the orchestrator sends FAR to investigate."""
@@ -253,6 +319,7 @@ class DetectionProcessor(Node):
 
     def write_detections_csv(self) -> bool:
         """Write tracked objects to ``output_csv``. Returns True on success."""
+
         csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
         if csv_dir:
             os.makedirs(csv_dir, exist_ok=True)
@@ -277,6 +344,8 @@ class DetectionProcessor(Node):
 
         self.get_logger().info(
             f'Wrote {len(self.objects)} detection(s) to {self._csv_path}'
+            f'Wrote {len(rows)} detection(s) to {self._csv_path} '
+            f'from {len(tracked)} track(s)'
         )
         return True
 
@@ -361,6 +430,8 @@ class DetectionProcessor(Node):
                 else:
                     # Clean first sighting — note it and continue exploring.
                     self.publish_resume_exploration()
+                self.write_detections_csv()
+                
                 continue
 
             # Existing track — upgrade if this observation is strictly better.
@@ -392,6 +463,8 @@ class DetectionProcessor(Node):
                     # Still a marginal observation even after upgrade — keep investigating.
                     self.publish_investigate_point(world_point)
                 # good→good upgrade: no publish needed.
+                self.write_detections_csv()
+
             else:
                 self.get_logger().info(
                     f'Observation not better than existing track for '
@@ -402,6 +475,7 @@ class DetectionProcessor(Node):
                 self.publish_resume_exploration()
                 matched_object.pending_confirmation = False
                 matched_object.continue_sent = True
+                self.write_detections_csv()
 
 
 def main(args=None) -> None:
