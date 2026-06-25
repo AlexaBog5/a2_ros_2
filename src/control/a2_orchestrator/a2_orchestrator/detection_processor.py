@@ -101,12 +101,24 @@ class DetectionProcessor(Node):
         self._detection_save_topic = self.get_parameter('detection_save_topic').value
         self._map_frame = self.get_parameter('map_frame').value
         self._csv_path = self.get_parameter('output_csv').value
-        self._world_match_distance = float(
-            self.get_parameter('world_match_distance').value
-        )
+
+        # Create CSV directory and file with header at start
+        csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
+        if csv_dir:
+            try:
+                os.makedirs(csv_dir, exist_ok=True)
+            except OSError as ex:
+                self.get_logger().error(f'Failed to create directory {csv_dir}: {ex}')
+        try:
+            with open(self._csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=['class', 'x', 'y', 'z'])
+                writer.writeheader()
+            self.get_logger().info(f'Initialized empty CSV file at {self._csv_path}')
+        except OSError as ex:
+            self.get_logger().error(f'Failed to initialize CSV file: {ex}')
 
         self.objects: list[TrackedObject] = []
-        self._processing_enabled = False
+        self._processing_enabled = True
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -423,13 +435,27 @@ class DetectionProcessor(Node):
                 continue
 
             if is_new:
+                self.write_detections_csv()
                 self.publish_resume_exploration()
                 continue
+
+            if detection.confidence > matched_object.confidence:
+                self.get_logger().info(
+                    f'Updating {matched_object.class_id} confidence '
+                    f'{matched_object.confidence:.2f}->{detection.confidence:.2f}'
+                )
+                matched_object.global_x = wx
+                matched_object.global_y = wy
+                matched_object.global_z = wz
+                matched_object.confidence = detection.confidence
+                matched_object.bbox = bbox
+                self.write_detections_csv()
 
             if matched_object.pending_confirmation and not matched_object.continue_sent:
                 self.publish_resume_exploration()
                 matched_object.pending_confirmation = False
                 matched_object.continue_sent = True
+                self.write_detections_csv()
 
 
 def main(args=None) -> None:
