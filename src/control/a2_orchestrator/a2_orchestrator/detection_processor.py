@@ -154,11 +154,6 @@ class DetectionProcessor(Node):
             self._investigate_point_topic,
             10,
         )
-        self._dummy_pub = self.create_publisher(
-            String,
-            '/dummy',
-            10,
-        )
 
         self._csv_headers = ['class', 'x', 'y', 'z', 'bad', 'observation_count']
 
@@ -171,10 +166,6 @@ class DetectionProcessor(Node):
 
     def _save_callback(self, msg: Bool) -> None:
         """Write tracked detections to CSV when commanded by the mission orchestrator."""
-        self._dummy_pub.publidh("SAVING")
-        if not msg.data:
-            return
-        self._dummy_pub.publidh("SAVING")
         self.write_detections_csv()
 
     def _enable_callback(self, msg: Bool) -> None:
@@ -255,16 +246,6 @@ class DetectionProcessor(Node):
             f'Publishing {self._investigate_point_topic}: origin (resume exploration)'
         )
 
-    def publish_dummy(self, detection, world_point: PointStamped) -> None:
-        """Publish a good detection summary to /dummy for debugging or downstream use."""
-        msg = String()
-        msg.data = (
-            f'class={detection.class_id} id={detection.id} '
-            f'confidence={detection.confidence:.2f} '
-            f'pos=({world_point.point.x:.3f}, {world_point.point.y:.3f}, {world_point.point.z:.3f})'
-        )
-        self._dummy_pub.publish(msg)
-        self.get_logger().info(f'Publishing /dummy: {msg.data}')
 
     def destroy_node(self):
         """Shut down without writing CSV (orchestrator triggers save via ``/detection/save``)."""
