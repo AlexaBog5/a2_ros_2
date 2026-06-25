@@ -21,7 +21,7 @@ from std_msgs.msg import Bool, String
 from a2_orchestrator.mission_state import MissionState
 
 RESUME_ORIGIN_EPSILON = 1e-3
-INVESTIGATION_TIMEOUT_SEC = 60.0
+INVESTIGATION_TIMEOUT_SEC = 30.0
 
 
 class MissionOrchestrator(Node):
@@ -109,7 +109,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter('save_dir', '/a2_ros/runs/current')
         self.declare_parameter('stand_wait_sec', 3.0)
         self.declare_parameter('exploration_finish_topic', '/exploration_finish')
-        self.declare_parameter('exploration_timeout_sec', 10.0)
+        self.declare_parameter('exploration_timeout_sec', 600.0)
         self.declare_parameter('home_arrival_threshold_m', 0.5)
         self.declare_parameter('nav_home_timeout_sec', 600.0)
         self.declare_parameter('skip_home', False)
