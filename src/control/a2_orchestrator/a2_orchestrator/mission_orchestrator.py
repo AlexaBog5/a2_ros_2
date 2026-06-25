@@ -106,7 +106,7 @@ class MissionOrchestrator(Node):
 
     def _declare_parameters(self) -> None:
         """Register ROS parameters (do not declare use_sim_time — launch sets it)."""
-        self.declare_parameter('save_dir', './runs/a2_mission')
+        self.declare_parameter('save_dir', '/a2_ros/runs/current')
         self.declare_parameter('stand_wait_sec', 3.0)
         self.declare_parameter('exploration_finish_topic', '/exploration_finish')
         self.declare_parameter('exploration_timeout_sec', 600.0)
