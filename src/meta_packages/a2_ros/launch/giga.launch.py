@@ -13,7 +13,7 @@ Usage:
   a2 sim --scene scene_test_meshes.xml 
 
 
-  ros2 launch a2_ros giga.launch.py use_sim_time:=true sim_detection:=true exploration_timeout:=60.0
+  ros2 launch a2_ros giga.launch.py use_sim_time:=true sim_detection:=true exploration_timeout:=60.0 x_min:=1.0 x_max:=10.0 y_min:=-8.0 y_max:=8.0 spacing:=1.5 
 
 """
 
@@ -57,7 +57,7 @@ def generate_launch_description():
     )
     object_detection_classes_arg = DeclareLaunchArgument(
         'object_detection_classes',
-        default_value='[39, 25, 11, 24]',
+        default_value='[11, 24, 25, 74]',
         description='COCO class IDs for YOLO detection',
     )
     detection_csv_arg = DeclareLaunchArgument(
@@ -95,6 +95,11 @@ def generate_launch_description():
         default_value='60.0',
         description='Global exploration timeout in seconds'
     )
+    spacing_arg = DeclareLaunchArgument(
+        'spacing',
+        default_value='2.0',
+        description='Spacing between grid points (meters)'
+    )
 
     # ---- Conditional Object Detection Groups ----
     object_detection_sim = IncludeLaunchDescription(
@@ -112,7 +117,7 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
-            'object_detection_classes': '[11, 24, 25, 74, 39]',
+            'object_detection_classes': '[11, 24, 25, 74]',
             'lidar_topic': '/front_lidar/points',
             'input_camera_name': '/camera',
         }.items(),
@@ -170,6 +175,7 @@ def generate_launch_description():
         y_max_arg,
         use_local_frame_arg,
         exploration_timeout_arg,
+        spacing_arg,
 
         SetParameter(name='use_sim_time', value=LaunchConfiguration('use_sim_time')),
 
@@ -263,7 +269,7 @@ def generate_launch_description():
                 'pointPerPathThre':    2,
                 'minRelZ':             -0.5,
                 'maxRelZ':             0.8,
-                'maxSpeed':            0.5,
+                'maxSpeed':            0.8,
                 'dirWeight':           0.1,
                 'dirThre':             90.0,
                 'dirToVehicle':        False,
@@ -299,7 +305,7 @@ def generate_launch_description():
                 'yawRateGain':      10.0,
                 'stopYawRateGain':  8.0,
                 'maxYawRate':       45.0,
-                'maxSpeed':         0.5,
+                'maxSpeed':         0.8,
                 'maxAccel':         2.0,
                 'switchTimeThre':   1.0,
                 'dirDiffThre':      0.1,
@@ -349,7 +355,7 @@ def generate_launch_description():
                 '-p', ['x_max:=', LaunchConfiguration('x_max')],
                 '-p', ['y_min:=', LaunchConfiguration('y_min')],
                 '-p', ['y_max:=', LaunchConfiguration('y_max')],
-                '-p', 'spacing:=2.0',
+                '-p', ['spacing:=', LaunchConfiguration('spacing')],
                 '-p', 'inflation_radius:=0.8',
                 '-p', 'goal_timeout:=25.0',
                 '-p', 'reach_threshold:=0.8',

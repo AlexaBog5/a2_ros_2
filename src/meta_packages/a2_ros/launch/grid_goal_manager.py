@@ -35,6 +35,8 @@ class GridGoalManager(Node):
         self.declare_parameter('reach_threshold', 0.8)    # Distance (meters) to declare success
         self.declare_parameter('publish_rate', 1.0)       # Frequency (Hz) to republish active goal to FAR Planner
         self.declare_parameter('exploration_timeout', 60.0) # Global exploration timeout (seconds)
+        self.declare_parameter('los_skip_distance', 2.2)     # Max distance to skip nodes with clear LOS (meters)
+        self.declare_parameter('los_fov_deg', 120.0)         # FOV cone angle for LOS skips (degrees)
         
         # Read parameters
         self.x_min = self.get_parameter('x_min').value
@@ -48,6 +50,8 @@ class GridGoalManager(Node):
         self.publish_rate = self.get_parameter('publish_rate').value
         self.use_local_frame = self.get_parameter('use_local_frame').value
         self.exploration_timeout = self.get_parameter('exploration_timeout').value
+        self.los_skip_distance = self.get_parameter('los_skip_distance').value
+        self.los_fov_deg = self.get_parameter('los_fov_deg').value
 
         # Save PCD parameters
         self.declare_parameter('save_dir', '/tmp/a2_mission')
@@ -493,6 +497,60 @@ class GridGoalManager(Node):
             else:
                 i += 1
 
+    def segments_intersect(self, p1, p2, A, B):
+        """Return True if line segment p1-p2 intersects line segment A-B in 2D."""
+        def ccw(a, b, c):
+            return (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x)
+        return ccw(p1, A, B) != ccw(p2, A, B) and ccw(p1, p2, A) != ccw(p1, p2, B)
+
+    def check_los_pruning(self):
+        """Skip queued grid nodes that are nearby, have clear line of sight, and are in front of the robot."""
+        if not self.latest_odom:
+            return
+        robot_pos = self.latest_odom.pose.pose.position
+        q = self.latest_odom.pose.pose.orientation
+        
+        # Compute robot heading (yaw)
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        los_dist = self.get_parameter('los_skip_distance').value
+        fov_half_rad = math.radians(self.get_parameter('los_fov_deg').value / 2.0)
+        
+        i = 0
+        while i < len(self.goal_queue):
+            p = self.goal_queue[i].point
+            
+            dx = p.x - robot_pos.x
+            dy = p.y - robot_pos.y
+            dist = math.sqrt(dx*dx + dy*dy)
+            
+            if dist < los_dist:
+                # Calculate angle of the target relative to the robot heading
+                angle_to_point = math.atan2(dy, dx)
+                rel_angle = angle_to_point - yaw
+                
+                # Normalize relative angle to [-pi, pi]
+                rel_angle = (rel_angle + math.pi) % (2.0 * math.pi) - math.pi
+                
+                # Check if target is inside the front-facing FOV cone
+                if abs(rel_angle) <= fov_half_rad:
+                    # Check line of sight against all dynamic obstacle segments
+                    has_los = True
+                    for seg in self.latest_segments:
+                        A, B = seg[0], seg[1]
+                        if self.segments_intersect(robot_pos, p, A, B):
+                            has_los = False
+                            break
+                    if has_los:
+                        self.get_logger().info(
+                            f"Pruning node ({p.x:.2f}, {p.y:.2f}) - within {dist:.2f}m in front cone (rel_angle: {math.degrees(rel_angle):.1f} deg) with clear Line of Sight"
+                        )
+                        self.goal_queue.pop(i)
+                        continue
+            i += 1
+
     def control_loop(self):
         # Read parameters dynamically
         self.goal_timeout = self.get_parameter('goal_timeout').value
@@ -572,6 +630,10 @@ class GridGoalManager(Node):
         # Dynamic occlusion pruning for pending queue
         if self.grid_started and self.goal_queue:
             self.check_dynamic_occlusion()
+            
+        # Line of Sight pruning for pending queue
+        if self.grid_started and self.goal_queue:
+            self.check_los_pruning()
                 
         self.publish_markers()
 

@@ -94,6 +94,11 @@ def generate_launch_description():
         default_value='true',
         description='Generate grid relative to robot current pose if true'
     )
+    spacing_arg = DeclareLaunchArgument(
+        'spacing',
+        default_value='2.0',
+        description='Spacing between grid points (meters)'
+    )
 
     nodes = [
         rviz_arg,
@@ -104,6 +109,7 @@ def generate_launch_description():
         y_min_arg,
         y_max_arg,
         use_local_frame_arg,
+        spacing_arg,
         # Use sim time for all navigation nodes
         SetParameter(name='use_sim_time', value=LaunchConfiguration('use_sim_time')),
 
@@ -310,7 +316,7 @@ def generate_launch_description():
                 '-p', ['x_max:=', LaunchConfiguration('x_max')],
                 '-p', ['y_min:=', LaunchConfiguration('y_min')],
                 '-p', ['y_max:=', LaunchConfiguration('y_max')],
-                '-p', 'spacing:=2.0',
+                '-p', ['spacing:=', LaunchConfiguration('spacing')],
                 '-p', 'inflation_radius:=0.8',
                 '-p', 'goal_timeout:=25.0',
                 '-p', 'reach_threshold:=0.8',
