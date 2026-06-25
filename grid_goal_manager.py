@@ -4,6 +4,8 @@ Grid-based Coverage and Navigation Manager for FAR Planner.
 Generates a grid inside a user-defined bounding box, filters nodes that are occluded
 by obstacle boundaries published by FAR Planner, sorts the path, and navigates them 
 sequentially with success ranges and active timeouts.
+
+ros2 launch a2_ros navigation_2.launch.py grid:=true use_sim_time:=true 
 """
 
 import rclpy
