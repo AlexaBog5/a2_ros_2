@@ -155,7 +155,7 @@ def generate_launch_description():
                 'pathRangeBySpeed':    True,
                 'pathCropByGoal':      True,
                 'autonomyMode':        True,
-                'autonomySpeed':       2.0,
+                'autonomySpeed':       0.8,
                 'joyToSpeedDelay':     2.0,
                 'joyToCheckObstacleDelay': 5.0,
                 'goalClearRange':      0.4,
@@ -178,8 +178,13 @@ def generate_launch_description():
                 'yawRateGain':      10.0,
                 'stopYawRateGain':  8.0,
                 'maxYawRate':       45.0,
+<<<<<<< HEAD
+                'maxSpeed':         0.5,
+                'maxAccel':         0.8,
+=======
                 'maxSpeed':         0.3,
                 'maxAccel':         0.5,
+>>>>>>> origin/main
                 'switchTimeThre':   1.0,
                 'dirDiffThre':      0.1,
                 'stopDisThre':      0.3,

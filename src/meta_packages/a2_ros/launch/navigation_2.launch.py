@@ -35,8 +35,8 @@ Usage:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
 
@@ -53,10 +53,59 @@ def generate_launch_description():
         description='Launch RViz2 with navigation config'
     )
 
+    grid_arg = DeclareLaunchArgument(
+        'grid',
+        default_value='false',
+        description='Launch grid_goal_manager instead of multi_goal_manager'
+    )
+
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='false',
+        description='Use simulation (Gazebo/MuJoCo) clock if true'
+    )
+
+    x_min_arg = DeclareLaunchArgument(
+        'x_min',
+        default_value='1.0',
+        description='Minimum X bound (local forward or global map X)'
+    )
+
+    x_max_arg = DeclareLaunchArgument(
+        'x_max',
+        default_value='9.0',
+        description='Maximum X bound (local forward or global map X)'
+    )
+
+    y_min_arg = DeclareLaunchArgument(
+        'y_min',
+        default_value='-4.0',
+        description='Minimum Y bound (local right or global map Y)'
+    )
+
+    y_max_arg = DeclareLaunchArgument(
+        'y_max',
+        default_value='4.0',
+        description='Maximum Y bound (local left or global map Y)'
+    )
+
+    use_local_frame_arg = DeclareLaunchArgument(
+        'use_local_frame',
+        default_value='true',
+        description='Generate grid relative to robot current pose if true'
+    )
+
     nodes = [
         rviz_arg,
+        grid_arg,
+        use_sim_time_arg,
+        x_min_arg,
+        x_max_arg,
+        y_min_arg,
+        y_max_arg,
+        use_local_frame_arg,
         # Use sim time for all navigation nodes
-        SetParameter(name='use_sim_time', value=False),
+        SetParameter(name='use_sim_time', value=LaunchConfiguration('use_sim_time')),
 
         # ---- terrain analysis (local map) ----
         Node(
@@ -230,7 +279,47 @@ def generate_launch_description():
                 ('/terrain_cloud',      '/terrain_map_ext'),
                 ('/scan_cloud',         '/registered_scan'),
                 ('/terrain_local_cloud','/terrain_map'),
+                ('/goal_point',         '/far_planner/goal_point'),
             ],
+        ),
+
+        # ---- multi_goal_manager (handles waypoint queue and timeouts) ----
+        ExecuteProcess(
+            cmd=[
+                'python3',
+                os.path.join(a2_ros_dir, 'launch', 'multi_goal_manager.py'),
+                '--ros-args',
+                '-p', 'goal_timeout:=30.0',
+                '-p', 'reach_threshold:=0.8',
+                '-p', 'publish_rate:=1.0',
+                '-p', 'use_multi_goal:=true',
+                '-p', ['use_sim_time:=', LaunchConfiguration('use_sim_time')],
+            ],
+            name='multi_goal_manager',
+            output='screen',
+            condition=UnlessCondition(LaunchConfiguration('grid')),
+        ),
+
+        # ---- grid_goal_manager (handles grid coverage search and timeouts) ----
+        ExecuteProcess(
+            cmd=[
+                'python3',
+                os.path.join(a2_ros_dir, 'launch', 'grid_goal_manager.py'),
+                '--ros-args',
+                '-p', ['x_min:=', LaunchConfiguration('x_min')],
+                '-p', ['x_max:=', LaunchConfiguration('x_max')],
+                '-p', ['y_min:=', LaunchConfiguration('y_min')],
+                '-p', ['y_max:=', LaunchConfiguration('y_max')],
+                '-p', 'spacing:=2.0',
+                '-p', 'inflation_radius:=0.8',
+                '-p', 'goal_timeout:=25.0',
+                '-p', 'reach_threshold:=0.8',
+                '-p', ['use_local_frame:=', LaunchConfiguration('use_local_frame')],
+                '-p', ['use_sim_time:=', LaunchConfiguration('use_sim_time')],
+            ],
+            name='grid_goal_manager',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('grid')),
         ),
 
         # ---- RViz with navigation config ----

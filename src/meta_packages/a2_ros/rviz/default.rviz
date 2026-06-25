@@ -356,6 +356,18 @@ Visualization Manager:
         Depth: 5
         History Policy: Keep Last
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: WaypointQueue
+      Namespaces:
+        multi_goal: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /waypoint_markers
+      Value: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: base_link
@@ -363,6 +375,23 @@ Visualization Manager:
   Name: root
   Tools:
     - Class: rviz_default_plugins/MoveCamera
+    - Class: goalpoint_rviz_plugin/GoalpointTool
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: goalpoint
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
   Transformation:
     Current:
       Class: rviz_default_plugins/TF
